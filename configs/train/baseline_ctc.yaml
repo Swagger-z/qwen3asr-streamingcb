@@ -1,0 +1,4 @@
+﻿# TODO: define training optimizer/scheduler/batching and runtime settings.
+train:
+  seed: 42
+  max_steps: 1000

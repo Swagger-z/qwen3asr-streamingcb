@@ -1,0 +1,3 @@
+﻿# TODO: define model dimensions, subsampling factor, encoder layers, and dropout.
+model:
+  name: baseline_ctc

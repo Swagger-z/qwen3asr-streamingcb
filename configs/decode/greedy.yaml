@@ -1,0 +1,3 @@
+﻿# TODO: define offline decode options.
+decode:
+  type: greedy

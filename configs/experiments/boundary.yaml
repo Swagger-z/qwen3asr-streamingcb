@@ -1,0 +1,11 @@
+experiment:
+  primary_model: Qwen/Qwen3-ASR-0.6B
+  replication_model: Qwen/Qwen3-ASR-1.7B
+  chunk_ms: [160, 560, 1120, 2000]
+  rollback_tokens: [0, 2, 5, 10, 20]
+  overlap_ms: [0, 100, 200, 400]
+  lookahead_ms: [100, 200, 300]
+  catalog_sizes: [10, 100, 1000, 10000, 100000]
+  distractors: [random, homophone, prefix, semantic, common]
+  bootstrap_samples: 2000
+  seed: 42

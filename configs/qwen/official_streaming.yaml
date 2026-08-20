@@ -1,0 +1,31 @@
+backend:
+  model: Qwen/Qwen3-ASR-0.6B
+  language: null
+  gpu_memory_utilization: 0.8
+  max_new_tokens: 64
+
+session:
+  sample_rate: 16000
+  chunk_size_ms: 2000
+  base_rollback_tokens: 5
+  max_rollback_tokens: 32
+  unfixed_chunk_num: 2
+  enter_threshold: 0.55
+  exit_threshold: 0.35
+  active_ttl_chunks: 3
+  confirmed_ttl_chunks: 2
+  retrieval_top_k: 20
+  prompt_top_k: 5
+  token_bias_bonus: 0.0
+  token_bias_max_bonus: 4.0
+  enable_token_bias: false
+  enable_transcript_probe: false
+  stateful_transcript_probe: true
+  enable_adaptive_lookahead: false
+  lookahead_ms: 200
+  uncertainty_low: 0.45
+  uncertainty_high: 0.75
+  max_effective_context_ms: 2000
+
+runtime:
+  feed_step_ms: 100

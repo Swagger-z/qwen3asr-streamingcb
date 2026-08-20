@@ -1,0 +1,9 @@
+probe:
+  encoder_dim: 896
+  vocab_size: 256
+  blank_id: 0
+  learning_rate: 0.001
+  epochs: 10
+  grad_clip: 5.0
+  seed: 42
+  symbols: []

@@ -1,0 +1,56 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+htmlcov/
+
+# Local tools, editors, and operating-system files
+.tools/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Secrets and machine-local settings
+.env
+.env.*
+!.env.example
+
+# Training data, model weights, indexes, and experiment outputs
+data/
+datasets/
+models/
+checkpoints/
+outputs/
+artifacts/
+runs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.npy
+*.npz
+
+# Generated traces and inspection artifacts
+*.inspect.ndjson
+*.trace.jsonl
+docs/.paper_draft/
+MinerU_*
+
+# Binary research/reference artifacts are kept locally by default.
+*.pdf
+*.docx
+*.ppt
+*.pptx

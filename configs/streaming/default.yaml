@@ -1,0 +1,6 @@
+﻿# TODO: define streaming chunk/cache/commit settings.
+streaming:
+  chunk_ms: 640
+  lookback_chunks: 4
+  lookahead_ms: 0
+  commit_window_chunks: 2

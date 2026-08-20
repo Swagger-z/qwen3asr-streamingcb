@@ -1,0 +1,128 @@
+# GLCLAP 累计音频热词检索模块 v1
+
+本模块是独立检索闭环，不接入 prompt、logit bias、CandidateManager 或
+commit/rollback。现有 AC、phoneme-CTC retriever 及其导入路径不变。
+
+## 架构
+
+默认配置 `qwen_post_projector_frozen` 冻结 Qwen3-ASR-0.6B 的 AuT、原
+projector 和 LLM token embedding：
+
+```text
+16 kHz PCM
+  -> Qwen AuT ln_post [T,896]
+  -> Qwen proj1/GELU/proj2 [T,1024] (冻结)
+  -> audio MLP adapter [T,512]
+
+hotword text
+  -> Qwen token embedding mean pool [1024] (冻结)
+  -> text MLP adapter [512]
+
+score(h) = max_t dot(audio_t, text_h)
+```
+
+`QwenGLCLAPEncoder` 通过临时 forward hook 只读取得 `ln_post` 输出，官方
+Qwen 源码和 checkpoint 不会被修改。checkpoint 只保存 retrieval branch，
+不会重复保存 Qwen 权重。
+
+三种初始化配置：
+
+- `configs/glclap/qwen_post_projector_frozen.yaml`：论文默认方案。
+- `configs/glclap/qwen_projector_warmstart.yaml`：复制 `proj1/proj2` 到独立
+  retrieval branch，第 0 个 epoch 冻结，从第 1 个 epoch 起使用 `3e-5`。
+- `configs/glclap/random_projector.yaml`：同形状随机初始化，并采用相同的
+  冻结/学习率日程，保证初始化消融公平。
+- `configs/glclap/global_only_clap.yaml`：`local_weight=0` 的 Go/No-Go 基线。
+
+## 数据 schema
+
+AISHELL-1 训练 manifest（JSONL）：
+
+```json
+{"utt_id":"BAC009S0002W0122","audio":"/data/aishell/wav.wav","text":"欢迎来到人工智能岛"}
+```
+
+每个 epoch 根据 `seed/epoch/utt_id` 确定性采样一个 2--8 字连续 local
+positive。负词文件可以是版本化 hotword JSONL，也可以是每行一个中文词的
+UTF-8 文本；每个 batch 会排除全部 positive 后共享采样 4095 个不同负词。
+
+Dev/Test-AISHELL1-NE manifest 在上述字段外增加：
+
+```json
+{"target_hotword_ids":["poi-0001"],"boundary_group":"Cross-50"}
+```
+
+hotword catalog 继续使用项目已有 schema：`id/text/aliases/language/weight/metadata`。
+建库时 canonical text 和每个 alias 分别编码，检索时按 ID 取最高 variant 分数。
+
+## 可复现命令
+
+Linux CUDA 环境使用固定版本 `qwen-asr==0.0.6`、
+`transformers==4.57.6`、`vllm==0.14.0`：
+
+```bash
+pip install -e '.[probe,qwen,config]'
+
+python scripts/train_glclap_retriever.py \
+  --config configs/glclap/qwen_post_projector_frozen.yaml \
+  --manifest data/aishell1/train.jsonl \
+  --negative-catalog data/hotwords/zh_train_10k.jsonl \
+  --output-dir outputs/glclap/frozen
+
+python scripts/build_glclap_index.py \
+  --config configs/glclap/qwen_post_projector_frozen.yaml \
+  --checkpoint outputs/glclap/frozen/last.pt \
+  --catalog data/hotwords/aishell1_ne_10k.jsonl \
+  --output outputs/glclap/frozen/aishell1_ne_10k.npz
+
+python scripts/decode_streaming_retrieval.py \
+  --config configs/glclap/qwen_post_projector_frozen.yaml \
+  --checkpoint outputs/glclap/frozen/last.pt \
+  --index outputs/glclap/frozen/aishell1_ne_10k.npz \
+  --manifest data/aishell1_ne/test_boundary.jsonl \
+  --output outputs/glclap/frozen/test.jsonl \
+  --trace-dir outputs/glclap/frozen/traces \
+  --verify-offline
+
+python scripts/eval_hotword_retrieval.py \
+  --input outputs/glclap/frozen/test.jsonl \
+  --baseline outputs/glclap/global_only/test.jsonl \
+  --output outputs/glclap/frozen/metrics.json
+```
+
+训练默认 micro batch 为 8、gradient accumulation 为 48，对应单进程有效
+batch 384。显存不足时可通过 `--override training.micro_batch_size=...` 和
+`training.gradient_accumulation_steps=...` 保持乘积不变。当前 v1 是单进程
+训练入口，多卡用于并行跑不同初始化/seed 实验。
+
+## 流式与索引约束
+
+- `step(pcm16k)` 可以接收任意长度输入；每累计满 2 秒返回一次结果。
+- 每次 refresh 都重新编码从 0 到当前边界的全部音频；`finish()` 对尾块再做
+  一次完整累计编码。整 2 秒结束时复用最后一次结果而不重复编码。
+- 一个 active session 不允许替换 index，必须先 `reset()`；各 session 的 PCM、
+  chunk ID 和结果均为独立状态。
+- key 以 fp16 存储；score 时分块转 fp32，默认 block size 16384。检索是精确
+  矩阵乘法，不是 ANN。流式 CUDA 命令会在开始时把约 20 MB 的 10k×512
+  fp32 scoring cache 放到与 adapter 相同的 GPU；NumPy 输入仍走 CPU GEMM，
+  两条路径使用相同的 alias max 聚合和 Top-K 语义。
+- 数据、Qwen 权重、retriever checkpoint 和 `.npz` index 不提交仓库。
+
+## 指标和决策门槛
+
+评测命令报告 Recall@1/5/10/20/50、MRR、Precision/F1/FAR、
+BoundaryPenalty、首次进入 Top-50 的 chunk、各阶段 P50/P95、RTF、显存和
+offline/final parity。这里 FAR 定义为 Top-K 中非目标项比例，即
+`1 - Precision@K`。
+
+Go/No-Go 条件：
+
+1. 相比 global-only CLAP，Recall@50 至少提高 5 个百分点，配对 bootstrap
+   95% CI 下界大于 0。
+2. `BoundaryPenalty = Recall_center@50 - Recall_cross@50 <= 0.03`。
+3. 使用 `--verify-offline` 时 final accumulated 与离线整句 Top-K 完全一致。
+4. 10 秒音频、10k catalog 的 `search_ms` P95 小于 10 ms；AuT 累计重编码
+   时间单独报告，不计入 score-only 门槛。
+
+只有 warm-start 在 dev Recall@50 比冻结方案提高至少 2 个百分点且训练无
+NaN/发散时，才把 warm-start 升级为后续主配置。

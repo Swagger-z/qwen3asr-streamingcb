@@ -1,0 +1,37 @@
+model:
+  qwen_model: Qwen/Qwen3-ASR-0.6B
+  qwen_dtype: bfloat16
+  initialization: qwen_projector_warmstart
+  embedding_dim: 512
+
+loss:
+  temperature: 0.07
+  global_weight: 1.0
+  local_weight: 1.0
+
+training:
+  epochs: 10
+  adapter_lr: 0.0003
+  projector_lr: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  grad_clip: 1.0
+  bf16: true
+  micro_batch_size: 8
+  gradient_accumulation_steps: 48
+  negative_count: 4095
+  strict_negative_count: true
+  seed: 42
+
+index:
+  block_size: 16384
+  text_batch_size: 512
+
+streaming:
+  chunk_size_sec: 2.0
+  feed_step_ms: 100
+  top_k: 50
+
+runtime:
+  device: cuda
+  allow_cpu: false

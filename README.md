@@ -17,6 +17,7 @@ LLM-ASR work lives in `asr.backends` and `asr.contextual`.
 - Multi-path tokenizer trie and confidence-gated sparse vLLM logits processor
 - Accumulated-audio Qwen3-ASR adapter with strict dependency version checks
 - GLCLAP dual-adapter retrieval, Qwen-projector initialization ablations, exact 10k Top-50 index, and streaming retrieval CLI
+- Deterministic HKUST/MagicData-style word-frequency merging and leakage-safe 10k catalog preparation
 - Transcript probe, generic frozen-AuT sidecar, phoneme head training/extraction tools
 - Streaming session, JSONL traces, boundary-stress WAV builder, BWER/UWER and bootstrap evaluation
 
@@ -46,6 +47,32 @@ One JSON object per line:
 
 For M2 runs, build pronunciation paths explicitly with pinyin/ARPAbet. Character
 fallback exists only for M1 and dependency-free tests.
+
+## Prepare GLCLAP catalogs
+
+Corpus `word_freq.txt` files contain `TERM COUNT` rows. They are distractor
+sources, not gold named-entity annotations. Merge them into a training-negative
+catalog and combine annotated AISHELL1-NE targets with clean distractors:
+
+```bash
+build_glclap_catalogs \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --negative-output data/hotwords/zh_train_10k.jsonl \
+  --target-catalog data/aishell1_ne/targets_test.jsonl \
+  --eval-manifest data/aishell1_ne/test.jsonl \
+  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
+  --report data/hotwords/catalog_build_report.json \
+  --size 10000 \
+  --seed 42
+```
+
+The builder keeps 2--8 Han-character terms, samples across frequency-rank
+buckets, excludes targets/aliases and spoken evaluation substrings, validates
+manifest target IDs, and records source counts in both catalog metadata and a
+JSON report. Training also excludes every spoken 2--8 character batch substring
+before sampling shared negatives. See `docs/glclap_catalog_preparation.md` for
+schemas, leakage rules, and the boundary-manifest workflow.
 
 ## Decode and evaluate
 

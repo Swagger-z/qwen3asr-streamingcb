@@ -9,8 +9,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
-build/
-dist/
+/build/
+/dist/
 htmlcov/
 
 # Local tools, editors, and operating-system files
@@ -28,14 +28,14 @@ Thumbs.db
 !.env.example
 
 # Training data, model weights, indexes, and experiment outputs
-data/
-datasets/
-models/
-checkpoints/
-outputs/
-artifacts/
-runs/
-wandb/
+/data/
+/datasets/
+/models/
+/checkpoints/
+/outputs/
+/artifacts/
+/runs/
+/wandb/
 *.pt
 *.pth
 *.ckpt

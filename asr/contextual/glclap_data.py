@@ -39,6 +39,35 @@ def deterministic_local_positive(
     return normalized[start : start + length]
 
 
+def batch_negative_exclusions(
+    transcripts: Iterable[str],
+    *,
+    min_chars: int = 2,
+    max_chars: int = 8,
+) -> set[str]:
+    """Return spoken terms that must not be sampled as batch negatives.
+
+    The full normalized transcript is included alongside every contiguous
+    substring in the local-positive length range. This prevents a term that is
+    genuinely present in the audio from becoming a false negative merely
+    because another local span was sampled for the current epoch.
+    """
+
+    if min_chars <= 0 or max_chars < min_chars:
+        raise ValueError("invalid negative-exclusion length range")
+    excluded: set[str] = set()
+    for transcript in transcripts:
+        normalized = compact_transcript(transcript)
+        if not normalized:
+            continue
+        excluded.add(normalized)
+        upper = min(max_chars, len(normalized))
+        for length in range(min_chars, upper + 1):
+            for start in range(0, len(normalized) - length + 1):
+                excluded.add(normalized[start : start + length])
+    return excluded
+
+
 def sample_shared_negatives(
     vocabulary: Sequence[str],
     positives: Iterable[str],

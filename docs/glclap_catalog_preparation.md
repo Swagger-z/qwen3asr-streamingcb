@@ -9,10 +9,10 @@
 |---|---|---|
 | `word_freq.txt` | 提供普通词、领域词和其他实体作为 distractor | 否 |
 | `zh_train_10k.jsonl` | GLCLAP 每个 batch 共享采样的训练负词池 | 否 |
-| `aishell1_ne_10k.jsonl` | 检索索引使用的目标实体 + distractor 总表 | 目标部分需要 |
+| `aishell_ner_10k.jsonl` | 检索索引使用的目标实体 + distractor 总表 | 目标部分需要 |
 
 HKUST、MagicData 等其他语料的词频表可以混合，但只能把它们视为 distractor
-来源。AISHELL1-NE 的目标实体、别名和 `target_hotword_ids` 仍必须来自标注。
+来源。AISHELL-NER 的目标实体、别名和 `target_hotword_ids` 仍必须来自标注。
 
 ## 输入格式
 
@@ -33,50 +33,65 @@ HKUST、MagicData 等其他语料的词频表可以混合，但只能把它们�
 - 按频率排名分成 10 桶后等量、确定性采样，避免 top-10k 被高频功能词占满；
 - 用文本 SHA-256 前 16 位构造稳定 ID，并在 metadata 中保存各来源频次。
 
-目标实体文件继续使用标准 catalog JSONL：
+AISHELL-NER 官方 transcript 已直接标注实体，例如：
 
-```json
-{"catalog_version":"aishell1-ne-target-v1","id":"ne-0001","text":"张江人工智能岛","aliases":["人工智能岛"],"language":"zh","weight":1.0,"metadata":{"entity_type":"poi","split":"test"}}
+```text
+BAC009S0764W0127 <中原地产>首席分析师[张大伟]说
 ```
 
-评测 manifest 至少包含：
+stage1b 解析 `<ORG>`、`[PER]`、`(LOC)` marker，确定性派生标准 catalog：
 
 ```json
-{"utt_id":"BAC009S0002W0122","audio":"/data/aishell1_ne/test.wav","text":"今天前往张江人工智能岛参观","target_hotword_ids":["ne-0001"]}
+{"catalog_version":"aishell-ner-test-targets-v1","id":"aishell-ner-...","text":"中原地产","aliases":[],"language":"zh","weight":1.0,"metadata":{"source":"Alibaba-NLP/AISHELL-NER","entity_types":["ORG"],"split":"test"}}
 ```
 
-构建器会验证 manifest 中每个目标 ID 都存在于目标 catalog。评测 distractor
-还会排除目标文本、aliases，以及评测 transcript 中实际出现的全部 2--8 字
-子串，避免未标注但真实说出的词被错误计为 false alarm。
+以及保留 mention 标签的 manifest：
 
-## 一次构建训练库和评测库
+```json
+{"utt_id":"BAC...","audio":"/abs/BAC....wav","text":"中原地产首席分析师张大伟说","target_hotword_ids":["aishell-ner-..."],"entities":[{"mention_id":"BAC...#entity-00","hotword_id":"aishell-ner-...","text":"中原地产","entity_type":"ORG","char_start":0,"char_end":4,"occurrence_index":0}]}
+```
+
+转换器不从词表匹配或生成实体标签。评测 catalog 构建器验证所有 ID，并从
+distractor 中排除 gold surface forms 及完整 test transcript 的 2--8 字子串。
+
+## 隔离构建训练池与评测库
+
+训练负词池只读取 HKUST、MagicData 等词频文件，不允许读取 AISHELL-NER 的
+目标实体或评测转写：
 
 ```bash
-build_glclap_catalogs \
+python scripts/build_glclap_training_pool.py \
   --word-freq hkust=/data/hkust/word_freq.txt \
   --word-freq magicdata=/data/magicdata/word_freq.txt \
-  --negative-output data/hotwords/zh_train_10k.jsonl \
-  --target-catalog data/aishell1_ne/targets_test.jsonl \
-  --eval-manifest data/aishell1_ne/test.jsonl \
-  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
-  --report data/hotwords/catalog_build_report.json \
+  --output data/hotwords/zh_train_10k.jsonl \
+  --report data/hotwords/training_pool_report.json \
   --size 10000 \
   --seed 42
 ```
 
-也可以在源码目录运行：
+评测库是独立的数据准备步骤；它读取 AISHELL-NER gold 标注，只供建评测索引
+和计算指标使用：
 
 ```bash
-python scripts/build_glclap_catalogs.py ...
+python scripts/build_glclap_evaluation_catalog.py \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --target-catalog data/aishell_ner/targets_test.jsonl \
+  --eval-manifest data/aishell_ner/test.jsonl \
+  --output data/hotwords/aishell_ner_10k.jsonl \
+  --report data/hotwords/evaluation_catalog_report.json \
+  --size 10000 \
+  --seed 42
 ```
 
-如果 AISHELL1-NE 目标标注尚未准备好，只传 `--word-freq` 和
-`--negative-output` 即可先生成训练负词库。`--evaluation-output` 必须与
-`--target-catalog`、`--eval-manifest` 一起使用。
+两个 report 分别记录来源统计、过滤项、最终大小、随机种子和是否使用评测
+标注。旧的 `build_glclap_catalogs.py` 仅为兼容已有调用保留，正式 `run.sh`
+不再使用。若过滤后不足所需数量，命令会失败，不会用重复项静默补足。
 
-输出的 `catalog_build_report.json` 记录每个来源的总行数、接受/过滤行数、
-唯一词数、合并后词数、目标数、最终 catalog 大小和随机种子。若过滤后不足
-所需数量，命令会失败，不会用重复项静默补足。
+AISHELL-NER 原始文件到这两个 gold 文件的转换见
+[`aishell_ner_preparation.md`](aishell_ner_preparation.md)；所有 stage 的输入、
+输出、生产者和依赖关系见
+[`glclap_stage_data_contracts.md`](glclap_stage_data_contracts.md)。
 
 ## 训练时的假负例保护
 
@@ -91,14 +106,28 @@ local positive 而被错误当作负例。
 
 ## 构建边界压力 manifest
 
-先使用离线 forced aligner 为目标热词产生 `hotword_start_sec` 和
-`hotword_end_sec`，形成 `test_aligned.jsonl`。forced aligner 不进入在线链路。
+stage1b 的 `test_entities.jsonl` 已包含 gold entity text/type/character span；aligner
+只为每个 mention 补充 `hotword_start_sec` 和 `hotword_end_sec`：
+
+```bash
+AISHELL_NER_ENTITY_MANIFEST=data/aishell_ner/test_entities.jsonl \
+AISHELL_NER_TARGET_CATALOG=data/aishell_ner/targets_test.jsonl \
+AISHELL_NER_ALIGNED_MANIFEST=data/aishell_ner/test_aligned.jsonl \
+bash run_aligner.sh all
+```
+
+默认模型为 `Qwen/Qwen3-ForcedAligner-0.6B`。一条音频有多个实体时按 mention
+拆分；同一 surface form 重复出现时使用 gold `occurrence_index` 分别解析。完整
+item timestamp 另存为 trace，stage2 只消费聚合后的目标 span。forced aligner
+不生成实体标签，也不进入在线检索链路。
+
+对齐校验通过后再生成七种边界位置：
 
 ```bash
 python scripts/build_boundary_stress.py \
-  --manifest data/aishell1_ne/test_aligned.jsonl \
-  --output-dir data/aishell1_ne/boundary_wav \
-  --output-manifest data/aishell1_ne/test_boundary.jsonl \
+  --manifest data/aishell_ner/test_aligned.jsonl \
+  --output-dir data/aishell_ner/boundary_wav \
+  --output-manifest data/aishell_ner/test_boundary.jsonl \
   --chunk-ms 2000
 ```
 
@@ -107,9 +136,10 @@ python scripts/build_boundary_stress.py \
 
 ## 数据泄漏约束
 
-- AISHELL1-NE test 目标文本和 aliases 不得进入训练负词库。
-- 如果以后用 HKUST 或 MagicData 做测试，其测试实体必须从本次训练词频池中排除。
-- 评测 catalog 中普通词可以作为 distractor，但出现在当前评测 transcript 中的
-  词必须标成目标或从 distractor 中排除。
-- 保存原始词频文件 SHA-256、构建报告、catalog 和实验配置快照；这些产物不提交
-  GitHub，但应随实验归档。
+- stage1a 不得读取 AISHELL-NER test transcript、catalog 或实体标签，也不得根据
+  test gold 列表反向过滤训练负词池。
+- 训练负词池与 test entity surface form 的词面重合只能在训练完成后审计并报告，
+  不能据此改写训练输入；文本在推理时本就作为 catalog key 提供。
+- 评测 catalog 中普通词可以作为 distractor，但出现在完整 test transcript 中的
+  词必须从 distractor 中排除，避免把真实语音内容误计为 false alarm。
+- 保存所有输入 SHA-256、构建报告、catalog 和配置快照；数据产物不提交 GitHub。

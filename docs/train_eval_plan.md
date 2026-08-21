@@ -14,7 +14,7 @@
 - Boundary variants: center, B-400/B-200/B-100, Cross-25/50/75
 - Distractors: random, homophone/near-phone, shared prefix, semantic, common word
 - HKUST/MagicData word-frequency lists supply frequency-stratified common-word distractors, not gold entities
-- AISHELL1-NE annotations supply target IDs, canonical forms, aliases, and split membership
+- AISHELL-NER annotations supply target IDs, canonical forms, aliases, and split membership
 - Test targets/aliases and every spoken evaluation substring are excluded from distractors
 - Every catalog build archives source statistics, requested size, filters, seed, and output counts
 
@@ -55,14 +55,14 @@ UWER degradation is at most 0.5 percentage points.
 ## Reproduction
 
 ```bash
-build_glclap_catalogs \
-  --word-freq hkust=/data/hkust/word_freq.txt \
-  --word-freq magicdata=/data/magicdata/word_freq.txt \
-  --negative-output data/hotwords/zh_train_10k.jsonl \
-  --target-catalog data/aishell1_ne/targets_test.jsonl \
-  --eval-manifest data/aishell1_ne/test.jsonl \
-  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
-  --size 10000 --seed 42
+export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
+export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
+export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
+export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
+
+bash run.sh stage0 stage1
+bash run_aligner.sh all
+bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 
 python -m unittest discover -s tests -v
 RUN_CONTEXTUAL_STRESS=1 python -m unittest tests.test_contextual_stress -v

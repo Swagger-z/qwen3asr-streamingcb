@@ -51,28 +51,50 @@ fallback exists only for M1 and dependency-free tests.
 ## Prepare GLCLAP catalogs
 
 Corpus `word_freq.txt` files contain `TERM COUNT` rows. They are distractor
-sources, not gold named-entity annotations. Merge them into a training-negative
-catalog and combine annotated AISHELL1-NE targets with clean distractors:
+sources, not gold named-entity annotations. Evaluation entities come directly
+from the official AISHELL-NER PER/LOC/ORG markers; no lexicon matching infers
+the labels.
+
+First convert the gold annotation into the project's catalog and manifest views:
 
 ```bash
-build_glclap_catalogs \
-  --word-freq hkust=/data/hkust/word_freq.txt \
-  --word-freq magicdata=/data/magicdata/word_freq.txt \
-  --negative-output data/hotwords/zh_train_10k.jsonl \
-  --target-catalog data/aishell1_ne/targets_test.jsonl \
-  --eval-manifest data/aishell1_ne/test.jsonl \
-  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
-  --report data/hotwords/catalog_build_report.json \
-  --size 10000 \
-  --seed 42
+python scripts/prepare_aishell_ner.py \
+  --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.test.txt \
+  --wav-root /data/AISHELL-1/wav/test \
+  --target-catalog-output data/aishell_ner/targets_test.jsonl \
+  --eval-manifest-output data/aishell_ner/test.jsonl \
+  --entity-manifest-output data/aishell_ner/test_entities.jsonl \
+  --report data/aishell_ner/test_preparation_report.json \
+  --split test
 ```
 
-The builder keeps 2--8 Han-character terms, samples across frequency-rank
-buckets, excludes targets/aliases and spoken evaluation substrings, validates
-manifest target IDs, and records source counts in both catalog metadata and a
-JSON report. Training also excludes every spoken 2--8 character batch substring
-before sampling shared negatives. See `docs/glclap_catalog_preparation.md` for
-schemas, leakage rules, and the boundary-manifest workflow.
+Training-pool and evaluation-catalog construction remain intentionally separate:
+
+```bash
+python scripts/build_glclap_training_pool.py \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --output data/hotwords/zh_train_10k.jsonl \
+  --report data/hotwords/training_pool_report.json \
+  --size 10000 --seed 42
+
+python scripts/build_glclap_evaluation_catalog.py \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --target-catalog data/aishell_ner/targets_test.jsonl \
+  --eval-manifest data/aishell_ner/test.jsonl \
+  --output data/hotwords/aishell_ner_10k.jsonl \
+  --report data/hotwords/evaluation_catalog_report.json \
+  --size 10000 --seed 42
+```
+
+The training command never reads evaluation annotations. The evaluation command
+keeps every annotated target, excludes spoken evaluation substrings from its
+distractors, and validates target IDs. Training additionally excludes every
+spoken 2--8 character batch substring before sampling shared negatives. See
+`docs/aishell_ner_preparation.md` for the gold-label conversion,
+`docs/glclap_stage_data_contracts.md` for every stage's file contracts, and
+`docs/glclap_reproduction_matrix.md` for the exact GLCLAP/Amphion differences.
 
 ## Decode and evaluate
 
@@ -113,6 +135,28 @@ python scripts/train_phoneme_probe.py \
   --output outputs/probe/phoneme_head.pt
 ```
 
+## Offline hotword alignment
+
+`AISHELL_NER_ENTITY_MANIFEST` already contains gold entity text, type, character
+span, and mention ID parsed from AISHELL-NER. The independent forced aligner only
+adds acoustic timestamps needed by the boundary experiment:
+
+```bash
+export AISHELL_NER_ENTITY_MANIFEST=/data/aishell_ner/test_entities.jsonl
+export AISHELL_NER_TARGET_CATALOG=/data/aishell_ner/targets_test.jsonl
+export AISHELL_NER_ALIGNED_MANIFEST=/data/aishell_ner/test_aligned.jsonl
+export CUDA_VISIBLE_DEVICES=0
+
+INSTALL_DEPS=1 bash run_aligner.sh all
+```
+
+`run_aligner.sh` validates the pinned runtime, aligns the marker-free transcript,
+matches each gold mention, and verifies that timestamps fit the PCM16 WAV. Every
+entity mention becomes one aligned record. Repeated occurrences of the same
+surface form remain distinct and are resolved by their annotated
+`occurrence_index`. The aligner never creates entity labels and is never loaded
+by streaming retrieval.
+
 ## Boundary stress set
 
 The input manifest must contain offline reference fields
@@ -131,26 +175,27 @@ prepending silence; the online runtime never invokes forced alignment.
 
 ## End-to-end staged experiment
 
-`run.sh` connects catalog preparation, boundary-set construction, GLCLAP
-training, index building, accumulated-audio retrieval, evaluation, and tests in
-one reproducible stage pipeline:
+`run.sh` connects gold-label conversion, catalog preparation, boundary-set
+construction, GLCLAP training, indexing, accumulated-audio retrieval, evaluation,
+and tests:
 
 ```bash
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/aishell1/train.jsonl
-export AISHELL1_NE_TARGET_CATALOG=/data/aishell1_ne/targets_test.jsonl
-export AISHELL1_NE_EVAL_MANIFEST=/data/aishell1_ne/test.jsonl
-export AISHELL1_NE_ALIGNED_MANIFEST=/data/aishell1_ne/test_aligned.jsonl
+export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
+export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 
-# Install the pinned Qwen runtime and execute stage0--stage9.
-INSTALL_DEPS=1 bash run.sh all
+# Build train negatives and deterministically parse existing AISHELL-NER labels.
+bash run.sh stage0 stage1
+# Add offline acoustic timestamps for the boundary experiment.
+INSTALL_DEPS=1 bash run_aligner.sh all
+# Continue with boundary generation, training, indexing, retrieval, and evaluation.
+bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 ```
 
-Run selected stages with `bash run.sh stage0 stage1` or `bash run.sh 3 4 6`.
-The aligned manifest is the only forced-alignment input and must be prepared
-offline. See `docs/glclap_runbook.md` for every stage, input schema, resume
-behavior, ablation switch, and output path.
+See `docs/glclap_runbook.md` for every stage, input schema, resume behavior,
+ablation switch, and output path.
 
 ## Tests
 

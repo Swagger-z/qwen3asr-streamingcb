@@ -8,10 +8,10 @@
 #   HKUST_WORD_FREQ=/data/hkust/word_freq.txt \
 #   MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt \
 #   AISHELL1_TRAIN_MANIFEST=/data/manifests/aishell1_train.jsonl \
-#   AISHELL1_NE_TARGET_CATALOG=/data/manifests/aishell1_ne_targets.jsonl \
-#   AISHELL1_NE_EVAL_MANIFEST=/data/manifests/aishell1_ne_test.jsonl \
-#   AISHELL1_NE_ALIGNED_MANIFEST=/data/manifests/aishell1_ne_test_aligned.jsonl \
-#   bash run.sh all
+#   AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt \
+#   AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test bash run.sh stage0 stage1
+#   bash run_aligner.sh all
+#   bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 #
 # Run a subset or resume from a stage:
 #   bash run.sh stage0 stage1 stage2
@@ -30,16 +30,28 @@ LOG_ROOT="${LOG_ROOT:-${OUTPUT_ROOT}/logs}"
 HKUST_WORD_FREQ="${HKUST_WORD_FREQ:-${DATA_ROOT}/raw/hkust/word_freq.txt}"
 MAGICDATA_WORD_FREQ="${MAGICDATA_WORD_FREQ:-${DATA_ROOT}/raw/magicdata/word_freq.txt}"
 AISHELL1_TRAIN_MANIFEST="${AISHELL1_TRAIN_MANIFEST:-${DATA_ROOT}/aishell1/train.jsonl}"
-AISHELL1_NE_TARGET_CATALOG="${AISHELL1_NE_TARGET_CATALOG:-${DATA_ROOT}/aishell1_ne/targets_test.jsonl}"
-AISHELL1_NE_EVAL_MANIFEST="${AISHELL1_NE_EVAL_MANIFEST:-${DATA_ROOT}/aishell1_ne/test.jsonl}"
-AISHELL1_NE_ALIGNED_MANIFEST="${AISHELL1_NE_ALIGNED_MANIFEST:-${DATA_ROOT}/aishell1_ne/test_aligned.jsonl}"
+AISHELL_NER_ANNOTATED_TRANSCRIPT="${AISHELL_NER_ANNOTATED_TRANSCRIPT:-${DATA_ROOT}/raw/AISHELL-NER/data/aishell_ner_transcript.test.txt}"
+AISHELL_NER_WAV_ROOT="${AISHELL_NER_WAV_ROOT:-${DATA_ROOT}/raw/AISHELL-1/wav/test}"
+AISHELL_NER_DIR="${AISHELL_NER_DIR:-${DATA_ROOT}/aishell_ner}"
+AISHELL_NER_TARGET_CATALOG="${AISHELL_NER_TARGET_CATALOG:-${AISHELL1_NE_TARGET_CATALOG:-${AISHELL_NER_DIR}/targets_test.jsonl}}"
+AISHELL_NER_EVAL_MANIFEST="${AISHELL_NER_EVAL_MANIFEST:-${AISHELL_NER_DIR}/test.jsonl}"
+AISHELL_NER_ENTITY_MANIFEST="${AISHELL_NER_ENTITY_MANIFEST:-${AISHELL1_NE_EVAL_MANIFEST:-${AISHELL_NER_DIR}/test_entities.jsonl}}"
+AISHELL_NER_ALIGNED_MANIFEST="${AISHELL_NER_ALIGNED_MANIFEST:-${AISHELL1_NE_ALIGNED_MANIFEST:-${AISHELL_NER_DIR}/test_aligned.jsonl}}"
+AISHELL_NER_PREPARATION_REPORT="${AISHELL_NER_PREPARATION_REPORT:-${AISHELL_NER_DIR}/test_preparation_report.json}"
+
+# Backward-compatible aliases for pre-AISHELL-NER run commands.
+AISHELL1_NE_TARGET_CATALOG="${AISHELL1_NE_TARGET_CATALOG:-${AISHELL_NER_TARGET_CATALOG}}"
+AISHELL1_NE_EVAL_MANIFEST="${AISHELL1_NE_EVAL_MANIFEST:-${AISHELL_NER_ENTITY_MANIFEST}}"
+AISHELL1_NE_ALIGNED_MANIFEST="${AISHELL1_NE_ALIGNED_MANIFEST:-${AISHELL_NER_ALIGNED_MANIFEST}}"
 
 HOTWORD_DIR="${HOTWORD_DIR:-${DATA_ROOT}/hotwords}"
 NEGATIVE_CATALOG="${NEGATIVE_CATALOG:-${HOTWORD_DIR}/zh_train_10k.jsonl}"
-EVALUATION_CATALOG="${EVALUATION_CATALOG:-${HOTWORD_DIR}/aishell1_ne_10k.jsonl}"
-CATALOG_REPORT="${CATALOG_REPORT:-${HOTWORD_DIR}/catalog_build_report.json}"
-BOUNDARY_WAV_DIR="${BOUNDARY_WAV_DIR:-${DATA_ROOT}/aishell1_ne/boundary_wav}"
-BOUNDARY_MANIFEST="${BOUNDARY_MANIFEST:-${DATA_ROOT}/aishell1_ne/test_boundary.jsonl}"
+EVALUATION_CATALOG="${EVALUATION_CATALOG:-${HOTWORD_DIR}/aishell_ner_10k.jsonl}"
+TRAINING_POOL_REPORT="${TRAINING_POOL_REPORT:-${HOTWORD_DIR}/training_pool_report.json}"
+EVALUATION_CATALOG_REPORT="${EVALUATION_CATALOG_REPORT:-${CATALOG_REPORT:-${HOTWORD_DIR}/evaluation_catalog_report.json}}"
+CATALOG_REPORT="${CATALOG_REPORT:-${EVALUATION_CATALOG_REPORT}}"
+BOUNDARY_WAV_DIR="${BOUNDARY_WAV_DIR:-${AISHELL_NER_DIR}/boundary_wav}"
+BOUNDARY_MANIFEST="${BOUNDARY_MANIFEST:-${AISHELL_NER_DIR}/test_boundary.jsonl}"
 
 QWEN_MODEL="${QWEN_MODEL:-Qwen/Qwen3-ASR-0.6B}"
 CATALOG_SIZE="${CATALOG_SIZE:-10000}"
@@ -76,7 +88,7 @@ Usage: bash run.sh <all|stage0|stage1|...|stage9> [...]
 
 Stages:
   stage0  Environment, pinned dependency, CUDA, source, and metadata checks
-  stage1  Merge HKUST/MagicData word_freq files and build both 10k catalogs
+  stage1  Build training pool, parse AISHELL-NER gold labels, and build evaluation catalog
   stage2  Build Center/B-400/B-200/B-100/Cross-25/50/75 boundary WAVs
   stage3  Train the global-only CLAP baseline
   stage4  Train the frozen Qwen projector GLCLAP main system
@@ -89,9 +101,9 @@ Stages:
 Important environment variables:
   HKUST_WORD_FREQ, MAGICDATA_WORD_FREQ
   AISHELL1_TRAIN_MANIFEST
-  AISHELL1_NE_TARGET_CATALOG
-  AISHELL1_NE_EVAL_MANIFEST
-  AISHELL1_NE_ALIGNED_MANIFEST
+  AISHELL_NER_ANNOTATED_TRANSCRIPT, AISHELL_NER_WAV_ROOT
+  AISHELL_NER_TARGET_CATALOG, AISHELL_NER_EVAL_MANIFEST
+  AISHELL_NER_ENTITY_MANIFEST, AISHELL_NER_ALIGNED_MANIFEST
   QWEN_MODEL, DATA_ROOT, OUTPUT_ROOT, CUDA_VISIBLE_DEVICES
   INSTALL_DEPS=1, RUN_ABLATIONS=0, VERIFY_OFFLINE=0, RUN_STRESS=0
 EOF
@@ -109,6 +121,15 @@ require_file() {
   local path="$1"
   local label="$2"
   if [[ ! -f "${path}" ]]; then
+    echo "[missing] ${label}: ${path}" >&2
+    exit 2
+  fi
+}
+
+require_directory() {
+  local path="$1"
+  local label="$2"
+  if [[ ! -d "${path}" ]]; then
     echo "[missing] ${label}: ${path}" >&2
     exit 2
   fi
@@ -201,33 +222,61 @@ stage0() {
 }
 
 stage1() {
-  echo "[stage1] build leakage-safe training and evaluation catalogs"
+  echo "[stage1a] build training-negative pool without evaluation annotations"
   require_file "${HKUST_WORD_FREQ}" "HKUST word frequency file"
   require_file "${MAGICDATA_WORD_FREQ}" "MagicData word frequency file"
-  require_file "${AISHELL1_NE_TARGET_CATALOG}" "AISHELL1-NE target catalog"
-  require_file "${AISHELL1_NE_EVAL_MANIFEST}" "AISHELL1-NE evaluation manifest"
   mkdir -p "${HOTWORD_DIR}"
-  "${PYTHON_BIN}" scripts/build_glclap_catalogs.py \
+  "${PYTHON_BIN}" scripts/build_glclap_training_pool.py \
     --word-freq "hkust=${HKUST_WORD_FREQ}" \
     --word-freq "magicdata=${MAGICDATA_WORD_FREQ}" \
-    --negative-output "${NEGATIVE_CATALOG}" \
-    --target-catalog "${AISHELL1_NE_TARGET_CATALOG}" \
-    --eval-manifest "${AISHELL1_NE_EVAL_MANIFEST}" \
-    --evaluation-output "${EVALUATION_CATALOG}" \
-    --report "${CATALOG_REPORT}" \
+    --output "${NEGATIVE_CATALOG}" \
+    --report "${TRAINING_POOL_REPORT}" \
     --size "${CATALOG_SIZE}" \
     --seed "${SEED}"
-  require_file "${NEGATIVE_CATALOG}" "generated training negative catalog"
+  require_file "${NEGATIVE_CATALOG}" "generated training negative pool"
+  require_file "${TRAINING_POOL_REPORT}" "training pool report"
+
+  echo "[stage1b] parse official AISHELL-NER gold entity annotations"
+  require_file "${AISHELL_NER_ANNOTATED_TRANSCRIPT}" "AISHELL-NER tagged transcript"
+  require_directory "${AISHELL_NER_WAV_ROOT}" "AISHELL-1 test WAV root"
+  mkdir -p "${AISHELL_NER_DIR}"
+  "${PYTHON_BIN}" scripts/prepare_aishell_ner.py \
+    --annotated-transcript "${AISHELL_NER_ANNOTATED_TRANSCRIPT}" \
+    --wav-root "${AISHELL_NER_WAV_ROOT}" \
+    --target-catalog-output "${AISHELL_NER_TARGET_CATALOG}" \
+    --eval-manifest-output "${AISHELL_NER_EVAL_MANIFEST}" \
+    --entity-manifest-output "${AISHELL_NER_ENTITY_MANIFEST}" \
+    --report "${AISHELL_NER_PREPARATION_REPORT}" \
+    --split test
+  require_file "${AISHELL_NER_TARGET_CATALOG}" "AISHELL-NER gold target catalog"
+  require_file "${AISHELL_NER_EVAL_MANIFEST}" "AISHELL-NER full evaluation manifest"
+  require_file "${AISHELL_NER_ENTITY_MANIFEST}" "AISHELL-NER entity-only manifest"
+  require_file "${AISHELL_NER_PREPARATION_REPORT}" "AISHELL-NER preparation report"
+
+  echo "[stage1c] build evaluation target+distractor catalog"
+  "${PYTHON_BIN}" scripts/build_glclap_evaluation_catalog.py \
+    --word-freq "hkust=${HKUST_WORD_FREQ}" \
+    --word-freq "magicdata=${MAGICDATA_WORD_FREQ}" \
+    --target-catalog "${AISHELL_NER_TARGET_CATALOG}" \
+    --eval-manifest "${AISHELL_NER_EVAL_MANIFEST}" \
+    --output "${EVALUATION_CATALOG}" \
+    --report "${EVALUATION_CATALOG_REPORT}" \
+    --size "${CATALOG_SIZE}" \
+    --seed "${SEED}"
   require_file "${EVALUATION_CATALOG}" "generated evaluation catalog"
-  require_file "${CATALOG_REPORT}" "catalog build report"
+  require_file "${EVALUATION_CATALOG_REPORT}" "evaluation catalog report"
 }
 
 stage2() {
   echo "[stage2] build controlled chunk-boundary evaluation audio"
-  require_file "${AISHELL1_NE_ALIGNED_MANIFEST}" "aligned AISHELL1-NE manifest"
+  if [[ ! -f "${AISHELL_NER_ALIGNED_MANIFEST}" ]]; then
+    echo "[missing] aligned AISHELL-NER manifest: ${AISHELL_NER_ALIGNED_MANIFEST}" >&2
+    echo "[hint] create it first with: bash run_aligner.sh all" >&2
+    exit 2
+  fi
   mkdir -p "${BOUNDARY_WAV_DIR}" "$(dirname -- "${BOUNDARY_MANIFEST}")"
   "${PYTHON_BIN}" scripts/build_boundary_stress.py \
-    --manifest "${AISHELL1_NE_ALIGNED_MANIFEST}" \
+    --manifest "${AISHELL_NER_ALIGNED_MANIFEST}" \
     --output-dir "${BOUNDARY_WAV_DIR}" \
     --output-manifest "${BOUNDARY_MANIFEST}" \
     --chunk-ms "${CHUNK_MS}"
@@ -266,7 +315,7 @@ stage6() {
     config="$(variant_config "${variant}")"
     output_dir="$(variant_dir "${variant}")"
     checkpoint="${output_dir}/last.pt"
-    index_path="${output_dir}/aishell1_ne_${CATALOG_SIZE}.npz"
+    index_path="${output_dir}/aishell_ner_${CATALOG_SIZE}.npz"
     require_file "${checkpoint}" "${variant} checkpoint"
     mkdir -p "${output_dir}"
     "${PYTHON_BIN}" scripts/build_glclap_index.py \
@@ -297,7 +346,7 @@ stage7() {
     config="$(variant_config "${variant}")"
     output_dir="$(variant_dir "${variant}")"
     checkpoint="${output_dir}/last.pt"
-    index_path="${output_dir}/aishell1_ne_${CATALOG_SIZE}.npz"
+    index_path="${output_dir}/aishell_ner_${CATALOG_SIZE}.npz"
     require_file "${checkpoint}" "${variant} checkpoint"
     require_file "${index_path}" "${variant} embedding index"
     "${PYTHON_BIN}" scripts/decode_streaming_retrieval.py \
@@ -350,8 +399,12 @@ stage9() {
     RUN_CONTEXTUAL_STRESS=1 "${PYTHON_BIN}" -m unittest tests.test_contextual_stress -v
     RUN_GLCLAP_STRESS=1 "${PYTHON_BIN}" -m unittest tests.test_glclap_stress -v
   fi
+  echo "[summary] AISHELL-NER gold views"
+  printf '  %s\n' "${AISHELL_NER_TARGET_CATALOG}" "${AISHELL_NER_EVAL_MANIFEST}" "${AISHELL_NER_ENTITY_MANIFEST}"
+  printf '  %s\n' "${AISHELL_NER_PREPARATION_REPORT}"
   echo "[summary] catalogs"
-  printf '  %s\n' "${NEGATIVE_CATALOG}" "${EVALUATION_CATALOG}" "${CATALOG_REPORT}"
+  printf '  %s\n' "${NEGATIVE_CATALOG}" "${TRAINING_POOL_REPORT}"
+  printf '  %s\n' "${EVALUATION_CATALOG}" "${EVALUATION_CATALOG_REPORT}"
   echo "[summary] boundary manifest"
   printf '  %s\n' "${BOUNDARY_MANIFEST}"
   echo "[summary] metrics"

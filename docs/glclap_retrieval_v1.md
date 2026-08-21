@@ -45,11 +45,11 @@ AISHELL-1 训练 manifest（JSONL）：
 每个 epoch 根据 `seed/epoch/utt_id` 确定性采样一个 2--8 字连续 local
 positive。负词文件可以是版本化 hotword JSONL、每行一个中文词的 UTF-8
 文本，也能读取 `词语 频次` 格式；正式实验应先用
-`build_glclap_catalogs` 合并和过滤多个词频来源。每个 batch 共享采样 4095
+`build_glclap_training_pool.py` 合并和过滤多个词频来源。每个 batch 共享采样 4095
 个不同负词，并排除完整 transcript、采样到的 positive，以及 transcript 中
 全部 2--8 字连续子串，防止真实说出的词成为假负例。
 
-Dev/Test-AISHELL1-NE manifest 在上述字段外增加：
+Dev/Test-AISHELL-NER manifest 在上述字段外增加：
 
 ```json
 {"target_hotword_ids":["poi-0001"],"boundary_group":"Cross-50"}
@@ -58,9 +58,9 @@ Dev/Test-AISHELL1-NE manifest 在上述字段外增加：
 hotword catalog 继续使用项目已有 schema：`id/text/aliases/language/weight/metadata`。
 建库时 canonical text 和每个 alias 分别编码，检索时按 ID 取最高 variant 分数。
 HKUST/MagicData `word_freq.txt` 只作为训练负词和评测 distractor 来源，不作为
-gold 命名实体。评测 10k catalog 必须由 AISHELL1-NE target/aliases 加 distractor
-组成；构建器会排除 target/aliases 和评测 transcript 中已说出的候选词，并验证
-manifest 的 `target_hotword_ids`。完整 schema、泄漏约束和边界 manifest 构建见
+gold 命名实体。评测 10k catalog 必须由 AISHELL-NER gold surface forms 加
+distractor 组成；构建器会排除 gold targets 和评测 transcript 中已说出的候选词，
+并验证 manifest 的 `target_hotword_ids`。完整 schema、泄漏约束和边界构建见
 `docs/glclap_catalog_preparation.md`。
 
 ## 可复现命令
@@ -71,14 +71,30 @@ Linux CUDA 环境使用固定版本 `qwen-asr==0.0.6`、
 ```bash
 pip install -e '.[probe,qwen,config]'
 
-build_glclap_catalogs \
+python scripts/prepare_aishell_ner.py \
+  --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.test.txt \
+  --wav-root /data/AISHELL-1/wav/test \
+  --target-catalog-output data/aishell_ner/targets_test.jsonl \
+  --eval-manifest-output data/aishell_ner/test.jsonl \
+  --entity-manifest-output data/aishell_ner/test_entities.jsonl \
+  --report data/aishell_ner/test_preparation_report.json \
+  --split test
+
+python scripts/build_glclap_training_pool.py \
   --word-freq hkust=/data/hkust/word_freq.txt \
   --word-freq magicdata=/data/magicdata/word_freq.txt \
-  --negative-output data/hotwords/zh_train_10k.jsonl \
-  --target-catalog data/aishell1_ne/targets_test.jsonl \
-  --eval-manifest data/aishell1_ne/test.jsonl \
-  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
-  --report data/hotwords/catalog_build_report.json \
+  --output data/hotwords/zh_train_10k.jsonl \
+  --report data/hotwords/training_pool_report.json \
+  --size 10000 \
+  --seed 42
+
+python scripts/build_glclap_evaluation_catalog.py \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --target-catalog data/aishell_ner/targets_test.jsonl \
+  --eval-manifest data/aishell_ner/test.jsonl \
+  --output data/hotwords/aishell_ner_10k.jsonl \
+  --report data/hotwords/evaluation_catalog_report.json \
   --size 10000 \
   --seed 42
 
@@ -91,14 +107,14 @@ python scripts/train_glclap_retriever.py \
 python scripts/build_glclap_index.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
   --checkpoint outputs/glclap/frozen/last.pt \
-  --catalog data/hotwords/aishell1_ne_10k.jsonl \
-  --output outputs/glclap/frozen/aishell1_ne_10k.npz
+  --catalog data/hotwords/aishell_ner_10k.jsonl \
+  --output outputs/glclap/frozen/aishell_ner_10k.npz
 
 python scripts/decode_streaming_retrieval.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
   --checkpoint outputs/glclap/frozen/last.pt \
-  --index outputs/glclap/frozen/aishell1_ne_10k.npz \
-  --manifest data/aishell1_ne/test_boundary.jsonl \
+  --index outputs/glclap/frozen/aishell_ner_10k.npz \
+  --manifest data/aishell_ner/test_boundary.jsonl \
   --output outputs/glclap/frozen/test.jsonl \
   --trace-dir outputs/glclap/frozen/traces \
   --verify-offline

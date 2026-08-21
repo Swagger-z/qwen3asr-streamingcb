@@ -18,11 +18,22 @@ Git。
 | 评测检索库 | `aishell_ner_10k.jsonl` | 否 | 是 | stage1c：gold target + distractor |
 
 `target-catalog` 是 AISHELL-NER gold surface form 的内部注册表，不是训练时抽取的
-local positive。默认训练 positive 仍由 `AISHELL1_TRAIN_MANIFEST.text` 按 epoch
+local positive。默认训练 positive 仍由 `AISHELL1_TRAIN_MANIFEST.target` 按 epoch
 确定性随机截取。评测标注不得输入 stage1a。
 
-## 外部输入 schema
+## 原始 ASR manifest 规范
 
+数据集提供的所有原始 ASR JSONL 均采用以下字段：
+
+```json
+{"key":"BAC009S0002W0122","source":"/data/aishell/wav/BAC009S0002W0122.wav","target":"而对楼市成交抑制作用最大的限购"}
+```
+
+程序为兼容已有内部派生文件，也接受 `utt_id/audio/text` 别名；新生成的 AISHELL-NER
+manifest 同时写出两套字段，但以 `key/source/target` 为规范接口。
+
+
+## 外部输入 schema
 ### 1. `HKUST_WORD_FREQ` / `MAGICDATA_WORD_FREQ`
 
 来源：外部、独立准备。编码 UTF-8，每行最后一列是正整数频次：

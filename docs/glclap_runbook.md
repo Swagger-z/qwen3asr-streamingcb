@@ -19,7 +19,7 @@ AISHELL-NER 官方 marker 到内部 gold catalog/manifest 的无推断转换见
 |---|---|---|
 | `HKUST_WORD_FREQ` | `data/raw/hkust/word_freq.txt` | 每行 `词语 频次` |
 | `MAGICDATA_WORD_FREQ` | `data/raw/magicdata/word_freq.txt` | 每行 `词语 频次` |
-| `AISHELL1_TRAIN_MANIFEST` | `data/aishell1/train.jsonl` | `utt_id/audio/text` |
+| `AISHELL1_TRAIN_MANIFEST` | `data/aishell1/train.jsonl` | `key/source/target` |
 | `AISHELL_NER_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.test.txt` | 官方 `UTT_ID TAGGED_TRANSCRIPT` |
 | `AISHELL_NER_WAV_ROOT` | `data/raw/AISHELL-1/wav/test` | 可递归扫描的 test WAV 根目录 |
 

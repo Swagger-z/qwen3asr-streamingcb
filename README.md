@@ -98,7 +98,15 @@ spoken 2--8 character batch substring before sampling shared negatives. See
 
 ## Decode and evaluate
 
-The manifest schema is JSONL with `utt_id`, `audio`, optional `text`,
+Dataset-facing manifests use one JSON object per line with the canonical fields
+`key`, `source`, and `target`, for example:
+
+```json
+{"key":"BAC009S0002W0122","source":"/data/aishell/wav/BAC009S0002W0122.wav","target":"而对楼市成交抑制作用最大的限购"}
+```
+
+The readers also accept the legacy aliases `utt_id`, `audio`, and `text` for
+already-generated internal artifacts. Optional contextual fields include
 `hotword_ids`, `context`, and `boundary_group`.
 
 ```bash

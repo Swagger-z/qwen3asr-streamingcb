@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from .glclap_data import batch_negative_exclusions, compact_transcript
+from asr.data.manifest import manifest_target
 
 
 _HAN_TERM = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]+")
@@ -422,7 +423,7 @@ def transcript_texts(records: Iterable[Mapping[str, Any]]) -> list[str]:
 
     texts: list[str] = []
     for record in records:
-        normalized = compact_transcript(str(record.get("text", "")))
+        normalized = compact_transcript(manifest_target(record, required=False))
         if normalized:
             texts.append(normalized)
     return texts

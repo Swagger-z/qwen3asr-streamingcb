@@ -20,6 +20,7 @@ from asr.data.forced_alignment import (
     record_target_ids,
     record_target_mentions,
 )
+from asr.data.manifest import manifest_key, manifest_source, manifest_target
 
 
 LANGUAGE_NAMES = {
@@ -62,9 +63,11 @@ def _read_manifest(path: Path) -> list[dict[str, Any]]:
             if not line.strip():
                 continue
             record = json.loads(line)
-            for field in ("utt_id", "audio", "text"):
-                if not str(record.get(field, "")):
-                    raise ValueError(f"{path}:{line_number}: missing {field}")
+            for field, accessor in (("key", manifest_key), ("source", manifest_source), ("target", manifest_target)):
+                try:
+                    accessor(record)
+                except ValueError as exc:
+                    raise ValueError(f"{path}:{line_number}: missing {field}") from exc
             if not record_target_ids(record):
                 raise ValueError(f"{path}:{line_number}: missing target_hotword_ids")
             records.append(record)
@@ -74,7 +77,7 @@ def _read_manifest(path: Path) -> list[dict[str, Any]]:
 
 
 def _resolve_audio(record: dict[str, Any], manifest_dir: Path) -> str:
-    value = str(record["audio"])
+    value = manifest_source(record)
     if value.startswith(("http://", "https://", "data:")):
         return value
     path = Path(value).expanduser()
@@ -169,7 +172,7 @@ def main() -> None:
     for record in records:
         unknown = set(record_target_ids(record)) - set(catalog.entries)
         if unknown:
-            raise ValueError(f"{record['utt_id']}: unknown target IDs: {sorted(unknown)}")
+            raise ValueError(f"{manifest_key(record)}: unknown target IDs: {sorted(unknown)}")
         record["audio"] = _resolve_audio(record, manifest_path.parent)
 
     completed = _load_completed(output_path) if args.resume else set()
@@ -177,7 +180,7 @@ def main() -> None:
         record
         for record in records
         if any(
-            (str(record["utt_id"]), str(mention["mention_id"])) not in completed
+            (manifest_key(record), str(mention["mention_id"])) not in completed
             for mention in record_target_mentions(record)
         )
     ]
@@ -199,7 +202,7 @@ def main() -> None:
                 assert aligner is not None
                 results = aligner.align(
                     audio=[str(record["audio"]) for record in batch],
-                    text=[str(record["text"]) for record in batch],
+                    text=[manifest_target(record) for record in batch],
                     language=[_language(record, args.language) for record in batch],
                 )
                 if len(results) != len(batch):
@@ -207,7 +210,7 @@ def main() -> None:
                         f"aligner returned {len(results)} results for a batch of {len(batch)}"
                     )
                 for record, result in zip(batch, results):
-                    source_id = str(record["utt_id"])
+                    source_id = manifest_key(record)
                     try:
                         items = _alignment_items(result)
                         if not items:

@@ -15,6 +15,7 @@ from asr.audio_io import read_wav_mono_float
 from asr.config import load_config
 from asr.contextual.glclap import AccumulatedAudioRetrievalSession, HotwordEmbeddingIndex
 from asr.contextual.glclap_runtime import build_glclap_runtime, jsonl_records
+from asr.data.manifest import manifest_key, manifest_source, manifest_target
 
 
 def parse_args() -> argparse.Namespace:
@@ -61,8 +62,8 @@ def main() -> None:
 
     with output.open("w", encoding="utf-8") as writer:
         for record in jsonl_records(args.manifest):
-            utt_id = str(record["utt_id"])
-            waveform = read_wav_mono_float(record["audio"], 16000)
+            utt_id = manifest_key(record)
+            waveform = read_wav_mono_float(manifest_source(record), 16000)
             if torch.cuda.is_available():
                 torch.cuda.reset_peak_memory_stats()
             session = AccumulatedAudioRetrievalSession(
@@ -94,8 +95,8 @@ def main() -> None:
             serialized_batches = [batch.to_dict() for batch in batches]
             output_record = {
                 "utt_id": utt_id,
-                "audio": record["audio"],
-                "text": record.get("text", ""),
+                "audio": manifest_source(record),
+                "text": manifest_target(record, required=False),
                 "target_hotword_ids": record.get(
                     "target_hotword_ids", record.get("hotword_ids", [])
                 ),

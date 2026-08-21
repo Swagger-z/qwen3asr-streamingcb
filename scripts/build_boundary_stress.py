@@ -12,6 +12,7 @@ if __package__ in {None, ""}:
 
 
 from asr.data.boundary_stress import build_variants
+from asr.data.manifest import manifest_key, manifest_source
 
 
 def main() -> None:
@@ -33,8 +34,8 @@ def main() -> None:
                 continue
             record = json.loads(line)
             variants = build_variants(
-                record["audio"],
-                output_dir / str(record["utt_id"]),
+                manifest_source(record),
+                output_dir / manifest_key(record),
                 float(record["hotword_start_sec"]),
                 float(record["hotword_end_sec"]),
                 args.chunk_ms / 1000,

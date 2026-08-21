@@ -17,6 +17,7 @@ import numpy as np
 
 from asr.audio_io import read_wav_mono_float
 from asr.config import load_config, require_mapping
+from asr.data.manifest import manifest_key, manifest_source, manifest_target, validate_manifest_schema
 from asr.contextual.glclap_data import (
     batch_negative_exclusions,
     deterministic_local_positive,
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--manifest", required=True, help="AISHELL-1 JSONL: utt_id/audio/text")
+    parser.add_argument("--manifest", required=True, help="AISHELL-1 JSONL: key/source/target")
     parser.add_argument("--negative-catalog", required=True, help="JSONL, one term per line, or TERM COUNT text")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume")
@@ -111,9 +112,7 @@ def main() -> None:
     records = jsonl_records(args.manifest)
     if not records:
         raise ValueError("training manifest is empty")
-    for field in ("utt_id", "audio", "text"):
-        if any(field not in record for record in records):
-            raise ValueError(f"every training record must contain {field!r}")
+    validate_manifest_schema(records)
     negative_vocabulary = load_negative_vocabulary(args.negative_catalog)
     model, _runtime, processor, payload = build_glclap_runtime(config, checkpoint=args.resume)
     device = next(model.adapters.parameters()).device
@@ -173,11 +172,11 @@ def main() -> None:
             running = {"loss": 0.0, "global": 0.0, "local": 0.0, "batches": 0}
             epoch_batches = list(batched(shuffled, micro_batch))
             for batch_index, batch_records in enumerate(epoch_batches):
-                transcripts = [str(record["text"]) for record in batch_records]
+                transcripts = [manifest_target(record) for record in batch_records]
                 positives = [
                     deterministic_local_positive(
                         transcript,
-                        utt_id=str(record["utt_id"]),
+                        utt_id=manifest_key(record),
                         epoch=epoch,
                         seed=seed,
                         min_chars=local_min_chars,
@@ -205,7 +204,7 @@ def main() -> None:
                     _extract_qwen_features(
                         model,
                         processor,
-                        read_wav_mono_float(record["audio"], 16000),
+                        read_wav_mono_float(manifest_source(record), 16000),
                     )
                     for record in batch_records
                 ]

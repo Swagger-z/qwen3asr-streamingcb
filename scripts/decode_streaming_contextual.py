@@ -19,6 +19,7 @@ from asr.config import load_config, require_mapping
 from asr.contextual.catalog import HotwordCatalog
 from asr.contextual.session import ContextualSessionConfig, ContextualStreamingSession
 from asr.contextual.trace import TraceWriter
+from asr.data.manifest import manifest_key, manifest_source, manifest_target
 
 
 def _jsonl(path: str | Path) -> Iterable[dict[str, Any]]:
@@ -61,8 +62,8 @@ def main() -> None:
 
     with output.open("w", encoding="utf-8") as writer:
         for record in _jsonl(args.manifest):
-            utt_id = str(record["utt_id"])
-            waveform = read_wav_mono_float(record["audio"], session_cfg.sample_rate)
+            utt_id = manifest_key(record)
+            waveform = read_wav_mono_float(manifest_source(record), session_cfg.sample_rate)
             enabled = record.get("hotword_ids") or list(catalog.entries)
             trace = TraceWriter(trace_dir / f"{utt_id}.jsonl") if trace_dir else None
             try:
@@ -88,7 +89,7 @@ def main() -> None:
                     trace.close()
             output_record = {
                 "utt_id": utt_id,
-                "reference": record.get("text", ""),
+                "reference": manifest_target(record, required=False),
                 "hypothesis": final.partial_text,
                 "stable_text": final.stable_text,
                 "hotwords": [catalog.entries[item].text for item in enabled],

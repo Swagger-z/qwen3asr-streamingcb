@@ -183,6 +183,9 @@ def main() -> None:
             if hotword_id not in target_ids:
                 target_ids.append(hotword_id)
         record: dict[str, object] = {
+            "key": utt_id,
+            "source": str(audio_by_id[utt_id]),
+            "target": transcript,
             "utt_id": utt_id,
             "audio": str(audio_by_id[utt_id]),
             "text": transcript,

@@ -39,7 +39,7 @@ Qwen 源码和 checkpoint 不会被修改。checkpoint 只保存 retrieval branc
 AISHELL-1 训练 manifest（JSONL）：
 
 ```json
-{"utt_id":"BAC009S0002W0122","audio":"/data/aishell/wav.wav","text":"欢迎来到人工智能岛"}
+{"key":"BAC009S0002W0122","source":"/data/aishell/wav.wav","target":"欢迎来到人工智能岛"}
 ```
 
 每个 epoch 根据 `seed/epoch/utt_id` 确定性采样一个 2--8 字连续 local

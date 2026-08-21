@@ -129,6 +129,29 @@ python scripts/build_boundary_stress.py \
 This creates Center, B-400/B-200/B-100, and Cross-25/50/75 variants by
 prepending silence; the online runtime never invokes forced alignment.
 
+## End-to-end staged experiment
+
+`run.sh` connects catalog preparation, boundary-set construction, GLCLAP
+training, index building, accumulated-audio retrieval, evaluation, and tests in
+one reproducible stage pipeline:
+
+```bash
+export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
+export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
+export AISHELL1_TRAIN_MANIFEST=/data/aishell1/train.jsonl
+export AISHELL1_NE_TARGET_CATALOG=/data/aishell1_ne/targets_test.jsonl
+export AISHELL1_NE_EVAL_MANIFEST=/data/aishell1_ne/test.jsonl
+export AISHELL1_NE_ALIGNED_MANIFEST=/data/aishell1_ne/test_aligned.jsonl
+
+# Install the pinned Qwen runtime and execute stage0--stage9.
+INSTALL_DEPS=1 bash run.sh all
+```
+
+Run selected stages with `bash run.sh stage0 stage1` or `bash run.sh 3 4 6`.
+The aligned manifest is the only forced-alignment input and must be prepared
+offline. See `docs/glclap_runbook.md` for every stage, input schema, resume
+behavior, ablation switch, and output path.
+
 ## Tests
 
 ```bash

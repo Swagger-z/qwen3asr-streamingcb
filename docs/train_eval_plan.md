@@ -13,6 +13,10 @@
 - Offline Qwen3-ForcedAligner supplies reference entity spans only for dataset preparation
 - Boundary variants: center, B-400/B-200/B-100, Cross-25/50/75
 - Distractors: random, homophone/near-phone, shared prefix, semantic, common word
+- HKUST/MagicData word-frequency lists supply frequency-stratified common-word distractors, not gold entities
+- AISHELL1-NE annotations supply target IDs, canonical forms, aliases, and split membership
+- Test targets/aliases and every spoken evaluation substring are excluded from distractors
+- Every catalog build archives source statistics, requested size, filters, seed, and output counts
 
 No model weights, datasets, or generated indexes are committed to the repository.
 
@@ -51,6 +55,15 @@ UWER degradation is at most 0.5 percentage points.
 ## Reproduction
 
 ```bash
+build_glclap_catalogs \
+  --word-freq hkust=/data/hkust/word_freq.txt \
+  --word-freq magicdata=/data/magicdata/word_freq.txt \
+  --negative-output data/hotwords/zh_train_10k.jsonl \
+  --target-catalog data/aishell1_ne/targets_test.jsonl \
+  --eval-manifest data/aishell1_ne/test.jsonl \
+  --evaluation-output data/hotwords/aishell1_ne_10k.jsonl \
+  --size 10000 --seed 42
+
 python -m unittest discover -s tests -v
 RUN_CONTEXTUAL_STRESS=1 python -m unittest tests.test_contextual_stress -v
 python scripts/decode_streaming_contextual.py --config configs/contextual/main.yaml --catalog data/hotwords.jsonl --manifest data/test.jsonl --output outputs/main.jsonl --trace-dir outputs/traces

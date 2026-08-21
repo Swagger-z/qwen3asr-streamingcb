@@ -21,6 +21,8 @@ training:
   gradient_accumulation_steps: 48
   negative_count: 4095
   strict_negative_count: true
+  local_min_chars: 2
+  local_max_chars: 8
   seed: 42
 
 index:

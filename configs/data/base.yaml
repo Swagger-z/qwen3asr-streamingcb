@@ -1,0 +1,5 @@
+﻿# TODO: define manifest paths, sample rate, and normalization policy.
+data:
+  train_manifests: []
+  dev_manifests: []
+  test_manifests: []

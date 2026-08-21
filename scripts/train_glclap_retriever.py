@@ -18,6 +18,7 @@ import numpy as np
 from asr.audio_io import read_wav_mono_float
 from asr.config import load_config, require_mapping
 from asr.contextual.glclap_data import (
+    batch_negative_exclusions,
     deterministic_local_positive,
     equality_positive_mask,
     sample_shared_negatives,
@@ -38,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--manifest", required=True, help="AISHELL-1 JSONL: utt_id/audio/text")
-    parser.add_argument("--negative-catalog", required=True, help="JSONL catalog or one term per line")
+    parser.add_argument("--negative-catalog", required=True, help="JSONL, one term per line, or TERM COUNT text")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--resume")
     parser.add_argument("--override", action="append", default=[])
@@ -157,6 +158,8 @@ def main() -> None:
     log_path = output_dir / "train.jsonl"
     negative_count = int(train_cfg.get("negative_count", 4095))
     strict_negatives = bool(train_cfg.get("strict_negative_count", True))
+    local_min_chars = int(train_cfg.get("local_min_chars", 2))
+    local_max_chars = int(train_cfg.get("local_max_chars", 8))
     use_bf16 = bool(train_cfg.get("bf16", True)) and str(device).startswith("cuda")
     autocast = lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16)
 
@@ -177,12 +180,20 @@ def main() -> None:
                         utt_id=str(record["utt_id"]),
                         epoch=epoch,
                         seed=seed,
+                        min_chars=local_min_chars,
+                        max_chars=local_max_chars,
                     )
                     for record, transcript in zip(batch_records, transcripts)
                 ]
+                spoken_terms = batch_negative_exclusions(
+                    transcripts,
+                    min_chars=local_min_chars,
+                    max_chars=local_max_chars,
+                )
+                excluded_negatives = spoken_terms | set(positives)
                 negatives = sample_shared_negatives(
                     negative_vocabulary,
-                    positives,
+                    excluded_negatives,
                     negative_count,
                     seed=seed,
                     epoch=epoch,

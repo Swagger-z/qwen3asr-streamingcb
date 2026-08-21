@@ -25,7 +25,7 @@ def jsonl_records(path: str | Path) -> list[dict[str, Any]]:
 
 
 def load_negative_vocabulary(path: str | Path) -> list[str]:
-    """Load canonical/alias negatives from JSONL or one-term-per-line text."""
+    """Load negatives from JSONL, one-term-per-line, or ``TERM COUNT`` text."""
 
     source = Path(path)
     if source.suffix.casefold() == ".jsonl":
@@ -38,13 +38,17 @@ def load_negative_vocabulary(path: str | Path) -> list[str]:
                 aliases = [aliases]
             values.extend(str(value) for value in aliases)
         return sorted({value for value in values if value})
-    return sorted(
-        {
-            line.strip()
-            for line in source.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        }
-    )
+    values: set[str] = set()
+    for line in source.read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = stripped.rsplit(maxsplit=1)
+        if len(fields) == 2 and fields[1].isdigit():
+            stripped = fields[0].strip()
+        if stripped:
+            values.add(stripped)
+    return sorted(values)
 
 
 def _device_from_config(config: Mapping[str, Any]) -> str:

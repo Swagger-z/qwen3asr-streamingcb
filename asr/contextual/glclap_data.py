@@ -89,6 +89,35 @@ def sample_shared_negatives(
     return tuple(generator.sample(available, count))
 
 
+class SharedNegativeSampler:
+    """Pre-canonicalized shared-negative sampler without per-step sorting."""
+
+    def __init__(self, vocabulary: Sequence[str]) -> None:
+        self.vocabulary = tuple(sorted({item for item in vocabulary if item}))
+
+    def sample(
+        self,
+        positives: Iterable[str],
+        count: int = 4095,
+        *,
+        seed: int = 42,
+        epoch: int = 0,
+        step: int = 0,
+        strict: bool = True,
+    ) -> tuple[str, ...]:
+        """Sample from the canonical vocabulary while excluding positives."""
+
+        excluded = set(positives)
+        available = [item for item in self.vocabulary if item not in excluded]
+        if strict and len(available) < count:
+            raise ValueError(
+                f"need {count} unique negatives after exclusion, found {len(available)}"
+            )
+        count = min(count, len(available))
+        generator = random.Random((int(seed) << 32) ^ (int(epoch) << 16) ^ int(step))
+        return tuple(generator.sample(available, count))
+
+
 def equality_positive_mask(left: Sequence[str], right: Sequence[str]) -> np.ndarray:
     """Build a multi-positive equality mask for duplicate-aware contrastive loss."""
 

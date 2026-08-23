@@ -46,3 +46,13 @@ def shard_epoch_records(records: Sequence[T], *, world_size: int, rank: int) -> 
         repeats = math.ceil(padding / len(values))
         values.extend((values * repeats)[:padding])
     return values[rank:total_size:world_size]
+
+
+def shard_evaluation_records(records: Sequence[T], *, world_size: int, rank: int) -> list[T]:
+    """Return a non-padding validation shard so every example is scored once."""
+
+    if world_size <= 0:
+        raise ValueError("world_size must be positive")
+    if rank < 0 or rank >= world_size:
+        raise ValueError("rank must be in [0, world_size)")
+    return list(records)[rank::world_size]

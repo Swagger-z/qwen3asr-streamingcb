@@ -26,6 +26,7 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 DATA_ROOT="${DATA_ROOT:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/outputs/glclap}"
 LOG_ROOT="${LOG_ROOT:-${OUTPUT_ROOT}/logs}"
+FEATURE_CACHE_DIR="${FEATURE_CACHE_DIR:-${DATA_ROOT}/glclap_qwen_feature_cache}"
 
 HKUST_WORD_FREQ="${HKUST_WORD_FREQ:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/hkust_wo_st/word_freq.txt}"
 MAGICDATA_WORD_FREQ="${MAGICDATA_WORD_FREQ:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/magicdata/word_freq.txt}"
@@ -67,6 +68,9 @@ EVAL_STEPS="${EVAL_STEPS:-100}"
 EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-0}"
 EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
 GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-384}"
+AUDIO_BATCHING="${AUDIO_BATCHING:-packed}"
+AUDIO_LOADER_WORKERS="${AUDIO_LOADER_WORKERS:-4}"
+TEXT_CACHE_MAX_ENTRIES="${TEXT_CACHE_MAX_ENTRIES:-20000}"
 VISIBLE_GPU_COUNT=1
 if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
   IFS=',' read -r -a VISIBLE_GPU_IDS <<< "${CUDA_VISIBLE_DEVICES}"
@@ -118,6 +122,8 @@ Important environment variables:
   QWEN_MODEL, DATA_ROOT, OUTPUT_ROOT, CUDA_VISIBLE_DEVICES
   EVAL_STRATEGY=epoch|steps, EVAL_STEPS=100, EVAL_MAX_SAMPLES=0, EVAL_BATCH_SIZE=8
   NUM_GPUS=<visible GPU count>, GLOBAL_BATCH_SIZE=384
+  FEATURE_CACHE_DIR=<shared fast disk>, AUDIO_BATCHING=packed|serial
+  AUDIO_LOADER_WORKERS=4, TEXT_CACHE_MAX_ENTRIES=20000
   INSTALL_DEPS=1, RUN_ABLATIONS=0, VERIFY_OFFLINE=0, RUN_STRESS=0
 EOF
 }
@@ -205,9 +211,13 @@ train_variant() {
     --dev-manifest "${AISHELL1_DEV_MANIFEST}"
     --negative-catalog "${NEGATIVE_CATALOG}"
     --output-dir "${output_dir}"
+    --feature-cache-dir "${FEATURE_CACHE_DIR}"
     --override "model.qwen_model=${QWEN_MODEL}"
     --override "training.seed=${SEED}"
     --override "training.global_batch_size=${GLOBAL_BATCH_SIZE}"
+    --override "training.audio_batching=${AUDIO_BATCHING}"
+    --override "training.audio_loader_workers=${AUDIO_LOADER_WORKERS}"
+    --override "training.text_cache_max_entries=${TEXT_CACHE_MAX_ENTRIES}"
     --override "evaluation.strategy=${EVAL_STRATEGY}"
     --override "evaluation.steps=${EVAL_STEPS}"
     --override "evaluation.max_samples=${EVAL_MAX_SAMPLES}"
@@ -220,7 +230,8 @@ train_variant() {
   if (( NUM_GPUS > 1 )); then
     launcher_args=("${PYTHON_BIN}" -m torch.distributed.run --standalone "--nproc_per_node=${NUM_GPUS}")
   fi
-  echo "[train] variant=${variant} num_gpus=${NUM_GPUS} global_batch=${GLOBAL_BATCH_SIZE}"
+  echo "[train] variant=${variant} num_gpus=${NUM_GPUS} global_batch=${GLOBAL_BATCH_SIZE} audio_batching=${AUDIO_BATCHING}"
+  echo "[train] feature_cache=${FEATURE_CACHE_DIR} audio_workers=${AUDIO_LOADER_WORKERS}"
   "${launcher_args[@]}" "${command_args[@]}"
   require_file "${checkpoint}" "${variant} final checkpoint"
   require_file "${output_dir}/best.pt" "${variant} best validation checkpoint"

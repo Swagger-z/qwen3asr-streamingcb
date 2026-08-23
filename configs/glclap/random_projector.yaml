@@ -19,6 +19,11 @@ training:
   bf16: true
   micro_batch_size: 8
   global_batch_size: 384
+  audio_batching: packed
+  audio_loader_workers: 4
+  text_cache_max_entries: 20000
+  text_cache_batch_size: 1024
+  prewarm_text_cache: true
   gradient_accumulation_steps: 48
   negative_count: 4095
   strict_negative_count: true

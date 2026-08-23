@@ -18,12 +18,22 @@ training:
   grad_clip: 1.0
   bf16: true
   micro_batch_size: 8
+  global_batch_size: 384
   gradient_accumulation_steps: 48
   negative_count: 4095
   strict_negative_count: true
   local_min_chars: 2
   local_max_chars: 8
   seed: 42
+
+evaluation:
+  strategy: epoch
+  steps: 100
+  batch_size: 8
+  negative_count: 4095
+  strict_negative_count: true
+  max_samples: 0
+  selection_metric: recall_at_50
 
 index:
   block_size: 16384
@@ -33,6 +43,9 @@ streaming:
   chunk_size_sec: 2.0
   feed_step_ms: 100
   top_k: 50
+
+distributed:
+  backend: nccl
 
 runtime:
   device: cuda

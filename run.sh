@@ -30,6 +30,7 @@ LOG_ROOT="${LOG_ROOT:-${OUTPUT_ROOT}/logs}"
 HKUST_WORD_FREQ="${HKUST_WORD_FREQ:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/hkust_wo_st/word_freq.txt}"
 MAGICDATA_WORD_FREQ="${MAGICDATA_WORD_FREQ:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/magicdata/word_freq.txt}"
 AISHELL1_TRAIN_MANIFEST="${AISHELL1_TRAIN_MANIFEST:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/aishell/aishell_train.jsonl}"
+AISHELL1_DEV_MANIFEST="${AISHELL1_DEV_MANIFEST:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/aishell/aishell_dev.jsonl}"
 AISHELL_NER_ANNOTATED_TRANSCRIPT="${AISHELL_NER_ANNOTATED_TRANSCRIPT:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/AISHELL-NER/data/aishell_ner_transcript.test.txt}"
 AISHELL_NER_WAV_ROOT="${AISHELL_NER_WAV_ROOT:-/data/zhengjie/datasets/asr/aishell/data_aishell/wav/test}"
 AISHELL_NER_DIR="${AISHELL_NER_DIR:-/data/zhengjie/research/SLAM-LLM/examples/asr_librispeech/datasets/AISHELL-NER}"
@@ -61,9 +62,19 @@ CHUNK_SIZE_SEC="${CHUNK_SIZE_SEC:-2.0}"
 FEED_STEP_MS="${FEED_STEP_MS:-100}"
 TOP_K="${TOP_K:-50}"
 BOOTSTRAP_SAMPLES="${BOOTSTRAP_SAMPLES:-2000}"
+EVAL_STRATEGY="${EVAL_STRATEGY:-epoch}"
+EVAL_STEPS="${EVAL_STEPS:-100}"
+EVAL_MAX_SAMPLES="${EVAL_MAX_SAMPLES:-0}"
+EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-8}"
+GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-384}"
+VISIBLE_GPU_COUNT=1
+if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+  IFS=',' read -r -a VISIBLE_GPU_IDS <<< "${CUDA_VISIBLE_DEVICES}"
+  VISIBLE_GPU_COUNT="${#VISIBLE_GPU_IDS[@]}"
+fi
+NUM_GPUS="${NUM_GPUS:-${VISIBLE_GPU_COUNT}}"
 
-# Stage switches. Training remains single-process; use CUDA_VISIBLE_DEVICES to
-# select a GPU, or launch independent variants from separate shells.
+# Stage switches. Each training variant uses torchrun when NUM_GPUS > 1.
 INSTALL_DEPS="${INSTALL_DEPS:-0}"
 REQUIRE_CUDA="${REQUIRE_CUDA:-1}"
 RESUME_TRAINING="${RESUME_TRAINING:-1}"
@@ -100,11 +111,13 @@ Stages:
 
 Important environment variables:
   HKUST_WORD_FREQ, MAGICDATA_WORD_FREQ
-  AISHELL1_TRAIN_MANIFEST
+  AISHELL1_TRAIN_MANIFEST, AISHELL1_DEV_MANIFEST
   AISHELL_NER_ANNOTATED_TRANSCRIPT, AISHELL_NER_WAV_ROOT
   AISHELL_NER_TARGET_CATALOG, AISHELL_NER_EVAL_MANIFEST
   AISHELL_NER_ENTITY_MANIFEST, AISHELL_NER_ALIGNED_MANIFEST
   QWEN_MODEL, DATA_ROOT, OUTPUT_ROOT, CUDA_VISIBLE_DEVICES
+  EVAL_STRATEGY=epoch|steps, EVAL_STEPS=100, EVAL_MAX_SAMPLES=0, EVAL_BATCH_SIZE=8
+  NUM_GPUS=<visible GPU count>, GLOBAL_BATCH_SIZE=384
   INSTALL_DEPS=1, RUN_ABLATIONS=0, VERIFY_OFFLINE=0, RUN_STRESS=0
 EOF
 }
@@ -172,27 +185,45 @@ train_variant() {
   local output_dir
   local checkpoint
   local -a command_args
+  local -a launcher_args
   config="$(variant_config "${variant}")"
   output_dir="$(variant_dir "${variant}")"
   checkpoint="${output_dir}/last.pt"
   require_file "${config}" "${variant} config"
   require_file "${AISHELL1_TRAIN_MANIFEST}" "AISHELL-1 training manifest"
+  if ! [[ "${NUM_GPUS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "NUM_GPUS must be a positive integer, got: ${NUM_GPUS}" >&2
+    return 2
+  fi
+  require_file "${AISHELL1_DEV_MANIFEST}" "AISHELL-1 validation manifest"
   require_file "${NEGATIVE_CATALOG}" "training negative catalog"
   mkdir -p "${output_dir}"
   command_args=(
     scripts/train_glclap_retriever.py
     --config "${config}"
     --manifest "${AISHELL1_TRAIN_MANIFEST}"
+    --dev-manifest "${AISHELL1_DEV_MANIFEST}"
     --negative-catalog "${NEGATIVE_CATALOG}"
     --output-dir "${output_dir}"
     --override "model.qwen_model=${QWEN_MODEL}"
     --override "training.seed=${SEED}"
+    --override "training.global_batch_size=${GLOBAL_BATCH_SIZE}"
+    --override "evaluation.strategy=${EVAL_STRATEGY}"
+    --override "evaluation.steps=${EVAL_STEPS}"
+    --override "evaluation.max_samples=${EVAL_MAX_SAMPLES}"
+    --override "evaluation.batch_size=${EVAL_BATCH_SIZE}"
   )
   if is_true "${RESUME_TRAINING}" && [[ -f "${checkpoint}" ]]; then
     command_args+=(--resume "${checkpoint}")
   fi
-  "${PYTHON_BIN}" "${command_args[@]}"
+  launcher_args=("${PYTHON_BIN}")
+  if (( NUM_GPUS > 1 )); then
+    launcher_args=("${PYTHON_BIN}" -m torch.distributed.run --standalone "--nproc_per_node=${NUM_GPUS}")
+  fi
+  echo "[train] variant=${variant} num_gpus=${NUM_GPUS} global_batch=${GLOBAL_BATCH_SIZE}"
+  "${launcher_args[@]}" "${command_args[@]}"
   require_file "${checkpoint}" "${variant} final checkpoint"
+  require_file "${output_dir}/best.pt" "${variant} best validation checkpoint"
 }
 
 stage0() {
@@ -209,7 +240,7 @@ stage0() {
   "${PYTHON_BIN}" -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
   "${PYTHON_BIN}" -c 'import importlib.metadata as m; expected={"qwen-asr":"0.0.6","transformers":"4.57.6","vllm":"0.14.0"}; actual={k:m.version(k) for k in expected}; wrong={k:(actual[k],v) for k,v in expected.items() if actual[k]!=v}; assert not wrong, wrong; print(actual)'
   if is_true "${REQUIRE_CUDA}"; then
-    "${PYTHON_BIN}" -c 'import torch; assert torch.cuda.is_available(), "CUDA is required"; print({"cuda":torch.version.cuda,"devices":torch.cuda.device_count(),"device0":torch.cuda.get_device_name(0)})'
+    "${PYTHON_BIN}" -c "import torch; requested=int('${NUM_GPUS}'); assert torch.cuda.is_available(), 'CUDA is required'; assert torch.cuda.device_count() >= requested, (torch.cuda.device_count(), requested); print({'cuda':torch.version.cuda,'devices':torch.cuda.device_count(),'requested_training_gpus':requested,'device0':torch.cuda.get_device_name(0)})"
   fi
   "${PYTHON_BIN}" -c "chunk_ms=float('${CHUNK_MS}'); chunk_sec=float('${CHUNK_SIZE_SEC}'); assert abs(chunk_ms/1000.0-chunk_sec)<1e-9, (chunk_ms,chunk_sec)"
   "${PYTHON_BIN}" -m compileall -q asr scripts tests
@@ -314,7 +345,7 @@ stage6() {
   while IFS= read -r variant; do
     config="$(variant_config "${variant}")"
     output_dir="$(variant_dir "${variant}")"
-    checkpoint="${output_dir}/last.pt"
+    checkpoint="${output_dir}/best.pt"
     index_path="${output_dir}/aishell_ner_${CATALOG_SIZE}.npz"
     require_file "${checkpoint}" "${variant} checkpoint"
     mkdir -p "${output_dir}"
@@ -345,7 +376,7 @@ stage7() {
   while IFS= read -r variant; do
     config="$(variant_config "${variant}")"
     output_dir="$(variant_dir "${variant}")"
-    checkpoint="${output_dir}/last.pt"
+    checkpoint="${output_dir}/best.pt"
     index_path="${output_dir}/aishell_ner_${CATALOG_SIZE}.npz"
     require_file "${checkpoint}" "${variant} checkpoint"
     require_file "${index_path}" "${variant} embedding index"

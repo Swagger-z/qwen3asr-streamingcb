@@ -20,6 +20,7 @@ AISHELL-NER 官方 marker 到内部 gold catalog/manifest 的无推断转换见
 | `HKUST_WORD_FREQ` | `data/raw/hkust/word_freq.txt` | 每行 `词语 频次` |
 | `MAGICDATA_WORD_FREQ` | `data/raw/magicdata/word_freq.txt` | 每行 `词语 频次` |
 | `AISHELL1_TRAIN_MANIFEST` | `data/aishell1/train.jsonl` | `key/source/target` |
+| `AISHELL1_DEV_MANIFEST` | `data/aishell1/dev.jsonl` | 独立 AISHELL-1 dev，`key/source/target`；key 不得与 train 重叠 |
 | `AISHELL_NER_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.test.txt` | 官方 `UTT_ID TAGGED_TRANSCRIPT` |
 | `AISHELL_NER_WAV_ROOT` | `data/raw/AISHELL-1/wav/test` | 可递归扫描的 test WAV 根目录 |
 
@@ -58,6 +59,7 @@ transcript 做批量对齐，并为每个 gold mention 补充时间范围；stag
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/manifests/aishell1_train.jsonl
+export AISHELL1_DEV_MANIFEST=/data/manifests/aishell1_dev.jsonl
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 export QWEN_MODEL=Qwen/Qwen3-ASR-0.6B
@@ -80,17 +82,49 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 | stage0 | Python、固定 Qwen/vLLM 版本、CUDA、源码和环境快照检查 | `outputs/glclap/run_metadata/` |
 | stage1 | 训练负词池（1a）、AISHELL-NER gold 转换（1b）、评测库（1c） | catalog、两个 manifest 与报告 |
 | stage2 | 消费独立 aligner 产物，前置静音生成七种 2 秒边界样本 | `test_boundary.jsonl` 和 boundary WAV |
-| stage3 | 训练 global-only CLAP 基线 | `outputs/glclap/global_only/last.pt` |
-| stage4 | 训练冻结原 Qwen projector 的主系统 | `outputs/glclap/frozen/last.pt` |
-| stage5 | 训练 projector warm-start 与 random projector 消融 | `warmstart/last.pt`、`random/last.pt` |
+| stage3 | 训练并验证 global-only CLAP 基线 | `outputs/glclap/global_only/{last,best}.pt` |
+| stage4 | 训练并验证冻结原 Qwen projector 的主系统 | `outputs/glclap/frozen/{last,best}.pt` |
+| stage5 | 训练并验证 projector 初始化消融 | `warmstart/{last,best}.pt`、`random/{last,best}.pt` |
 | stage6 | 为每个 checkpoint 编码目标和 aliases，构建 fp16 精确索引 | `aishell_ner_10000.npz` 和元数据 |
 | stage7 | 以 100 ms feed、2 秒 refresh 做累计音频 Top-50 检索 | `boundary_retrieval.jsonl` 和逐 chunk traces |
 | stage8 | 计算 Recall/MRR、BoundaryPenalty、延迟、offline parity 和 bootstrap CI | 每个变体的 `metrics.json` |
 | stage9 | 全量单测、100k catalog 与 10k×512 检索压力测试 | 测试日志和 artifact 列表 |
 
+## 训练期验证
+
+stage3--5 强制要求独立的 `AISHELL1_DEV_MANIFEST`。它与训练清单格式完全一致，
+训练入口会检查两者的 `key` 没有交集。dev local positive 按 `seed + utt_id` 固定
+抽取一次 2--8 字子串，所有验证轮次使用同一目标；它是训练期 checkpoint selection
+proxy，不替代 stage8 的 AISHELL-NER gold 实体最终评测。
+
+默认每个 epoch 结束验证一次：
+
+```bash
+EVAL_STRATEGY=epoch EVAL_MAX_SAMPLES=0 bash run.sh stage4
+```
+
+也可按固定 optimizer update 数验证；这里的 step 是完成 gradient accumulation 后的
+`optimizer.step()`，不是 micro batch：
+
+```bash
+EVAL_STRATEGY=steps EVAL_STEPS=100 EVAL_MAX_SAMPLES=512 bash run.sh stage4
+```
+
+`EVAL_MAX_SAMPLES=0` 默认使用完整 dev。固定 step 验证成本较高，可显式设为 512，
+此时会用固定 seed 选择同一个 dev 子集，保证各次验证可比。`EVAL_BATCH_SIZE`
+默认 8。每次验证把 validation loss、
+global/local loss、Recall@1/5/10/20/50 和 MRR 追加到 `train.jsonl`。默认按
+`Recall@50` 保存 `best.pt`；stage6/7 消费 `best.pt`，而 `last.pt` 只用于断点恢复。
+`steps` 模式若训练结束时未正好命中间隔，会额外做一次 final validation，保证产生
+`best.pt`。
+
+验证集和调度在进程启动时读取；给已有运行中的训练修改环境变量不会生效，必须
+停止后从新实验目录重启。
+
 ## 断点和消融控制
 
-训练脚本每个 epoch 写 `epoch-XX.pt` 和 `last.pt`。默认
+训练脚本每个 epoch 写 `epoch-XX.pt` 和 `last.pt`，并在验证指标改善时写
+`best.pt`。best metric/epoch/global step 同步保存在 checkpoint，默认
 `RESUME_TRAINING=1`，再次运行 stage3/4/5 时会从对应 `last.pt` 恢复：
 
 ```bash
@@ -121,12 +155,48 @@ bash run.sh stage3 stage4
 
 ## 多 GPU 使用
 
-当前训练入口不是 DDP。推荐为不同初始化或 seed 启动独立实验目录：
+stage3--5 已支持单机多卡 DDP。`run.sh` 默认从 `CUDA_VISIBLE_DEVICES` 的逗号
+分隔项数推断 `NUM_GPUS`；显式设置 `NUM_GPUS` 可覆盖。以下命令会让一个 frozen
+实验同时使用物理卡 4、5、6、7：
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 OUTPUT_ROOT=/exp/seed42 SEED=42 RUN_ABLATIONS=0 bash run.sh stage3 stage4
-CUDA_VISIBLE_DEVICES=1 OUTPUT_ROOT=/exp/seed43 SEED=43 RUN_ABLATIONS=0 bash run.sh stage3 stage4
+CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 RUN_ABLATIONS=0 bash run.sh stage4
 ```
 
-不要让两个进程同时写同一个 `OUTPUT_ROOT`。完成训练后分别运行各自的
-stage6–stage8，并保留 `run_metadata`、catalog 构建报告、配置快照和日志。
+内部等价 launcher 为：
+
+```bash
+python -m torch.distributed.run --standalone --nproc_per_node=4 \
+  scripts/train_glclap_retriever.py ...
+```
+
+训练数据在每个 epoch 做一次全局确定性 shuffle，再像 `DistributedSampler` 一样
+补齐并按 rank 等长分片。梯度累计期间使用 DDP `no_sync()`，只在 optimizer update
+同步。验证仅在 rank 0 的完整 dev 上运行，其他 rank 等待；日志、`best.pt`、
+`last.pt` 和 epoch checkpoint 也只由 rank 0 写，避免文件竞争。
+
+配置中的 `training.global_batch_size=384` 是所有 GPU 合计的 batch，不是每卡
+batch。`micro_batch_size=8` 时自动得到：
+
+| GPU 数 | 每卡 gradient accumulation | 全局有效 batch |
+|---:|---:|---:|
+| 1 | 48 | 384 |
+| 4 | 12 | 384 |
+| 8 | 6 | 384 |
+
+`GLOBAL_BATCH_SIZE` 必须能被 `micro_batch_size × NUM_GPUS` 整除，否则训练在加载
+模型前报错。只有把 `training.global_batch_size` 设为 0，才退回旧的“每卡固定
+`gradient_accumulation_steps`”语义；这种情况下 GPU 数增加会同时放大全局 batch。
+
+`bash run.sh stage3 stage4 stage5` 仍按变体顺序执行，但每个变体都会使用全部
+`NUM_GPUS`。如果要同时跑多个变体，应把 GPU 划成互不重叠的组，并使用不同的
+`OUTPUT_ROOT`，例如：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 NUM_GPUS=2 OUTPUT_ROOT=/exp/global bash run.sh stage3 &
+CUDA_VISIBLE_DEVICES=2,3 NUM_GPUS=2 OUTPUT_ROOT=/exp/frozen bash run.sh stage4 &
+wait
+```
+
+每个 rank 都会各自加载一份冻结 Qwen AuT，因此显存不会跨卡共享。正式环境使用
+NCCL；stage0 会检查可见 GPU 数不少于 `NUM_GPUS`。

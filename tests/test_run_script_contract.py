@@ -32,6 +32,7 @@ class RunScriptContractTests(unittest.TestCase):
             "HKUST_WORD_FREQ",
             "MAGICDATA_WORD_FREQ",
             "AISHELL1_TRAIN_MANIFEST",
+            "AISHELL1_DEV_MANIFEST",
             "AISHELL_NER_ANNOTATED_TRANSCRIPT",
             "AISHELL_NER_WAV_ROOT",
             "AISHELL_NER_TARGET_CATALOG",
@@ -43,6 +44,20 @@ class RunScriptContractTests(unittest.TestCase):
             "OUTPUT_ROOT",
         ):
             self.assertIn(f'{variable}="${{{variable}:-', script)
+
+    def test_training_requires_validation_and_uses_best_checkpoint(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "run.sh").read_text(encoding="utf-8")
+        self.assertIn('--dev-manifest "${AISHELL1_DEV_MANIFEST}"', script)
+        self.assertIn('evaluation.strategy=${EVAL_STRATEGY}', script)
+        self.assertIn('evaluation.steps=${EVAL_STEPS}', script)
+        self.assertIn('checkpoint="${output_dir}/best.pt"', script)
+
+    def test_multi_gpu_training_uses_torchrun_and_global_batch(self) -> None:
+        script = (Path(__file__).resolve().parents[1] / "run.sh").read_text(encoding="utf-8")
+        self.assertIn('NUM_GPUS="${NUM_GPUS:-${VISIBLE_GPU_COUNT}}"', script)
+        self.assertIn("-m torch.distributed.run --standalone", script)
+        self.assertIn('training.global_batch_size=${GLOBAL_BATCH_SIZE}', script)
+        self.assertIn('"--nproc_per_node=${NUM_GPUS}"', script)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ Git。
 | 类别 | 例子 | 训练使用 | 评测使用 | 生成方式 |
 |---|---|---:|---:|---|
 | 原始 ASR 训练清单 | `data/aishell1/train.jsonl` | 是 | 否 | 从 AISHELL-1 train 转换 |
+| 原始 ASR 验证清单 | `data/aishell1/dev.jsonl` | checkpoint selection | 否 | 从 AISHELL-1 dev 转换 |
 | 训练负词候选源 | HKUST/MagicData `word_freq.txt` | 是 | 可作 distractor 源 | 外部语料统计 |
 | 训练负词池 | `zh_train_10k.jsonl` | 是 | 否 | stage1a |
 | AISHELL-NER gold transcript | `aishell_ner_transcript.test.txt` | 否 | 是 | 数据集自带 PER/LOC/ORG marker |
@@ -65,6 +66,20 @@ manifest 同时写出两套字段，但以 `key/source/target` 为规范接口�
 
 默认 hybrid 协议每个 epoch 从 `text` 确定性抽一个 2--8 字连续子串作为 local
 positive。该文件不引用 AISHELL-NER test 标注。
+
+### 2b. `AISHELL1_DEV_MANIFEST`
+
+来源：外部、独立准备。schema 与 train 完全相同：
+
+```json
+{"key":"BAC009S0724W0121","source":"/data/aishell1/wav/dev/u.wav","target":"验证集人工转写"}
+```
+
+训练入口强制要求该文件，并拒绝任何与 train 重复的 `key`。验证 local positive
+使用固定 seed/utt_id 从 target 抽取一次，不随 epoch 改变。默认使用完整 dev；
+设置正数 `evaluation.max_samples` 才会选择固定子集。该集合只用于 loss、Recall/MRR 和
+`best.pt` 选择，不读取 AISHELL-NER test 标注，也不替代 stage8 最终评测。
+
 
 ### 3. `AISHELL_NER_ANNOTATED_TRANSCRIPT` / `AISHELL_NER_WAV_ROOT`
 
@@ -230,12 +245,15 @@ cross-75 七条 PCM16 WAV 与 `test_boundary.jsonl`。每条输出继承 target 
 输入：
 
 - `AISHELL1_TRAIN_MANIFEST`（外部）
+- `AISHELL1_DEV_MANIFEST`（外部，key 与 train 不重叠）
 - `NEGATIVE_CATALOG`（stage1a）
 - Qwen3-ASR 权重（外部）
 - `configs/glclap/global_only_clap.yaml`（仓库）
 
-输出：`outputs/glclap/global_only/{config.snapshot.json,train.jsonl,last.pt}`。
-当前 global loss 使用完整 transcript；local weight 为 0。
+输出：`outputs/glclap/global_only/{config.snapshot.json,train.jsonl,last.pt,best.pt}`。
+当前 global loss 使用完整 transcript；local weight 为 0。验证可选择每个 epoch 末
+或每固定 optimizer step 运行，日志包含 validation loss、Recall@1/5/10/20/50、
+MRR；默认用 Recall@50 选 `best.pt`。
 
 ## Stage 4：冻结 Qwen projector 的 GLCLAP 主系统
 
@@ -246,6 +264,10 @@ cross-75 七条 PCM16 WAV 与 `test_boundary.jsonl`。每条输出继承 target 
 - local negatives：从 stage1a pool 采 4095 个并在 batch 内共享；
 - Qwen AuT、原 projector 和 LLM token embedding 冻结，仅训练双 MLP adapter
   与 temperature。
+- 多卡时每个 rank 独立加载冻结 Qwen，训练 utterance 等长分片，adapter/projector/
+  temperature 梯度由 DDP 同步；验证和文件写入仅发生在 rank 0。
+- `global_batch_size=384` 固定所有 rank 合计的有效 batch，per-rank accumulation
+  由 `384 / (micro_batch_size × WORLD_SIZE)` 自动计算。
 
 这是项目的 **hybrid Qwen-AISHELL1 协议**，不是 GLCLAP 或 AmphionASR 的严格
 复现。输出目录为 `outputs/glclap/frozen/`。
@@ -255,7 +277,8 @@ cross-75 七条 PCM16 WAV 与 `test_boundary.jsonl`。每条输出继承 target 
 输入：同 stage4。分别使用 `qwen_projector_warmstart.yaml` 和
 `random_projector.yaml`；依赖 stage1a，但不依赖 stage3/4 checkpoint。
 
-输出：`outputs/glclap/{warmstart,random}/last.pt` 与训练日志。
+输出：`outputs/glclap/{warmstart,random}/{last,best}.pt` 与训练/验证日志；stage6
+统一消费各变体的 `best.pt`。
 
 ## Stage 6：文本 embedding index
 

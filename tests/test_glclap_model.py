@@ -77,6 +77,25 @@ class GLCLAPModelTests(unittest.TestCase):
         optimizer.step()
         self.assertEqual(before, module_parameter_hash(self.thinker))
 
+    def test_training_forward_exposes_all_ddp_trainables(self) -> None:
+        model = GLCLAPRetrieverModel(self.encoder, mode="qwen_post_projector_frozen")
+        features = self.encoder.extract_audio_features(torch.randn(5, 4), torch.tensor([5]))
+        input_ids = torch.tensor([[1, 2, 3]])
+        attention_mask = torch.ones_like(input_ids)
+        audio, transcripts, hotwords, temperature = model(
+            [features],
+            input_ids,
+            attention_mask,
+            input_ids,
+            attention_mask,
+        )
+        self.assertEqual(tuple(audio[0].shape), (5, 512))
+        self.assertEqual(tuple(transcripts.shape), (1, 512))
+        self.assertEqual(tuple(hotwords.shape), (1, 512))
+        (audio[0].sum() + transcripts.sum() + hotwords.sum() + temperature).backward()
+        self.assertIsNotNone(model.log_temperature.grad)
+
+
     def test_global_local_loss_and_multi_positive_mask(self) -> None:
         audio = torch.nn.functional.normalize(torch.randn(2, 4, 8), dim=-1).requires_grad_()
         transcripts = torch.nn.functional.normalize(torch.randn(2, 8), dim=-1).requires_grad_()

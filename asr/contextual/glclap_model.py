@@ -356,6 +356,28 @@ if nn is not None:
 
             return self.adapters.text(self.encoder.embed_text(input_ids, attention_mask))
 
+        def forward(
+            self,
+            audio_features: Sequence[QwenAudioFeatures],
+            transcript_input_ids: Any,
+            transcript_attention_mask: Any,
+            hotword_input_ids: Any,
+            hotword_attention_mask: Any,
+        ) -> tuple[list[Any], Any, Any, Any]:
+            """Encode a training batch through the DDP-visible retrieval branch.
+
+            Frozen Qwen audio/text feature extraction happens before this call;
+            all trainable adapters, the optional retrieval projector, and the
+            temperature remain registered on this module for gradient sync.
+            """
+
+            audio_sequences = [self.encode_audio_features(item) for item in audio_features]
+            transcript_keys = self.encode_text_tokens(
+                transcript_input_ids, transcript_attention_mask
+            )
+            hotword_keys = self.encode_text_tokens(hotword_input_ids, hotword_attention_mask)
+            return audio_sequences, transcript_keys, hotword_keys, self.temperature
+
         def optimizer_parameter_groups(
             self,
             adapter_lr: float = 3e-4,
@@ -528,6 +550,7 @@ def save_glclap_checkpoint(
     scheduler: Any | None = None,
     epoch: int = -1,
     global_step: int = 0,
+    training_state: Mapping[str, Any] | None = None,
 ) -> None:
     """Save retrieval-only parameters and reproducibility state."""
 
@@ -545,6 +568,7 @@ def save_glclap_checkpoint(
         "global_step": int(global_step),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "training_state": dict(training_state or {}),
     }
     torch.save(payload, target)
 

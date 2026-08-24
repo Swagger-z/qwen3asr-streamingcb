@@ -14,8 +14,10 @@ from asr.contextual.glclap import (
     HotwordEmbeddingIndex,
 )
 from asr.contextual.glclap_data import (
+    annotated_entity_positives,
     deterministic_local_positive,
     equality_positive_mask,
+    membership_positive_mask,
     sample_shared_negatives,
 )
 
@@ -132,6 +134,34 @@ class GLCLAPDataTests(unittest.TestCase):
     def test_multi_positive_mask_marks_duplicates(self) -> None:
         mask = equality_positive_mask(["甲", "甲", "乙"], ["甲", "乙", "甲"])
         self.assertEqual(mask.tolist(), [[True, False, True], [True, False, True], [False, True, False]])
+
+    def test_annotated_entities_supply_all_validation_positives(self) -> None:
+        record = {
+            "target": "\u4e2d\u539f\u5730\u4ea7\u9996\u5e2d\u5206\u6790\u5e08\u5f20\u5927\u4f1f\u8bf4",
+            "entities": [
+                {"text": "\u4e2d\u539f\u5730\u4ea7", "entity_type": "ORG"},
+                {"text": "\u5f20\u5927\u4f1f", "entity_type": "PER"},
+                {"text": "\u4e2d\u539f\u5730\u4ea7", "entity_type": "ORG"},
+            ],
+        }
+        positives = annotated_entity_positives(record)
+        self.assertEqual(
+            positives, ("\u4e2d\u539f\u5730\u4ea7", "\u5f20\u5927\u4f1f")
+        )
+        mask = membership_positive_mask(
+            [positives, ("\u5317\u4eac",)],
+            ["\u4e2d\u539f\u5730\u4ea7", "\u5317\u4eac", "\u5f20\u5927\u4f1f", "\u516c\u53f8"],
+        )
+        self.assertEqual(
+            mask.tolist(),
+            [[True, False, True, False], [False, True, False, False]],
+        )
+
+    def test_annotated_validation_rejects_missing_gold_entities(self) -> None:
+        with self.assertRaisesRegex(ValueError, "no gold entities"):
+            annotated_entity_positives(
+                {"target": "\u6ca1\u6709\u5b9e\u4f53", "entities": []}
+            )
 
 
 if __name__ == "__main__":

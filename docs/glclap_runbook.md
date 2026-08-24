@@ -2,7 +2,7 @@
 
 仓库根目录的 `run.sh` 串联了 catalog 构建、边界数据生成、四种模型训练、
 索引构建、累计音频检索、评测和压力测试。脚本面向 Linux CUDA 单机，训练
-入口仍是单进程；多张 GPU 用于从不同 shell 并行运行不同实验。
+支持单卡和 torchrun DDP；多张 GPU 既可用于同一实验，也可划分后并行运行不同实验。
 
 每个 stage 的输入文件、逐字段 schema、生产者、消费者和前序依赖统一定义在
 [`glclap_stage_data_contracts.md`](glclap_stage_data_contracts.md)。论文采样设置与
@@ -20,16 +20,24 @@ AISHELL-NER 官方 marker 到内部 gold catalog/manifest 的无推断转换见
 | `HKUST_WORD_FREQ` | `data/raw/hkust/word_freq.txt` | 每行 `词语 频次` |
 | `MAGICDATA_WORD_FREQ` | `data/raw/magicdata/word_freq.txt` | 每行 `词语 频次` |
 | `AISHELL1_TRAIN_MANIFEST` | `data/aishell1/train.jsonl` | `key/source/target` |
-| `AISHELL1_DEV_MANIFEST` | `data/aishell1/dev.jsonl` | 独立 AISHELL-1 dev，`key/source/target`；key 不得与 train 重叠 |
+| `AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.dev.txt` | 官方 dev `UTT_ID TAGGED_TRANSCRIPT` |
+| `AISHELL_NER_DEV_WAV_ROOT` | `data/raw/AISHELL-1/wav/dev` | 可递归扫描的 dev WAV 根目录 |
 | `AISHELL_NER_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.test.txt` | 官方 `UTT_ID TAGGED_TRANSCRIPT` |
 | `AISHELL_NER_WAV_ROOT` | `data/raw/AISHELL-1/wav/test` | 可递归扫描的 test WAV 根目录 |
 
-stage1b 直接解析 AISHELL-NER 已有的 `[PER]`、`(LOC)`、`<ORG>` gold marker，
-不会根据热词表推断实体。它生成三个内部视图：
+stage1b 解析 AISHELL-NER dev，供 checkpoint validation；stage1c 独立解析 test，
+供最终论文评测。两步都只读取已有的 `[PER]`、`(LOC)`、`<ORG>` gold marker，
+不会根据热词表推断实体。
 
-| 派生变量 | 默认路径 | 消费者 |
+| dev 派生变量 | 默认路径 | 消费者 |
 |---|---|---|
-| `AISHELL_NER_TARGET_CATALOG` | `data/aishell_ner/targets_test.jsonl` | stage1c、aligner、建库 |
+| `AISHELL_NER_DEV_TARGET_CATALOG` | `data/aishell_ner/targets_dev.jsonl` | 审计 dev gold 实体 |
+| `AISHELL_NER_DEV_EVAL_MANIFEST` | `data/aishell_ner/dev.jsonl` | 全量 dev，包含无实体句 |
+| `AISHELL_NER_DEV_ENTITY_MANIFEST` | `data/aishell_ner/dev_entities.jsonl` | stage3--5 validation |
+
+| test 派生变量 | 默认路径 | 消费者 |
+|---|---|---|
+| `AISHELL_NER_TARGET_CATALOG` | `data/aishell_ner/targets_test.jsonl` | stage1d、aligner、建库 |
 | `AISHELL_NER_EVAL_MANIFEST` | `data/aishell_ner/test.jsonl` | 全量 test 评测，包含无实体句 |
 | `AISHELL_NER_ENTITY_MANIFEST` | `data/aishell_ner/test_entities.jsonl` | aligner 与边界压力实验 |
 
@@ -59,7 +67,8 @@ transcript 做批量对齐，并为每个 gold mention 补充时间范围；stag
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/manifests/aishell1_train.jsonl
-export AISHELL1_DEV_MANIFEST=/data/manifests/aishell1_dev.jsonl
+export AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.dev.txt
+export AISHELL_NER_DEV_WAV_ROOT=/data/AISHELL-1/wav/dev
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 export QWEN_MODEL=Qwen/Qwen3-ASR-0.6B
@@ -80,7 +89,7 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 | 阶段 | 作用 | 主要输出 |
 |---|---|---|
 | stage0 | Python、固定 Qwen/vLLM 版本、CUDA、源码和环境快照检查 | `outputs/glclap/run_metadata/` |
-| stage1 | 训练负词池（1a）、AISHELL-NER gold 转换（1b）、评测库（1c） | catalog、两个 manifest 与报告 |
+| stage1 | 训练负词池（1a）、AISHELL-NER dev/test gold 转换（1b/1c）、测试库（1d） | dev/test catalog、manifest 与报告 |
 | stage2 | 消费独立 aligner 产物，前置静音生成七种 2 秒边界样本 | `test_boundary.jsonl` 和 boundary WAV |
 | stage3 | 训练并验证 global-only CLAP 基线 | `outputs/glclap/global_only/{last,best}.pt` |
 | stage4 | 训练并验证冻结原 Qwen projector 的主系统 | `outputs/glclap/frozen/{last,best}.pt` |
@@ -92,10 +101,11 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 
 ## 训练期验证
 
-stage3--5 强制要求独立的 `AISHELL1_DEV_MANIFEST`。它与训练清单格式完全一致，
-训练入口会检查两者的 `key` 没有交集。dev local positive 按 `seed + utt_id` 固定
-抽取一次 2--8 字子串，所有验证轮次使用同一目标；它是训练期 checkpoint selection
-proxy，不替代 stage8 的 AISHELL-NER gold 实体最终评测。
+stage3--5 强制使用 stage1b 生成的 `AISHELL_NER_DEV_ENTITY_MANIFEST`。每条语音的
+local positives 直接来自 AISHELL-NER dev 的 `entities[].text`，不再从 transcript
+随机截取；同一句中的多个不同 gold 实体会共同标为正样本。训练入口拒绝没有实体标注
+的验证记录，并检查其 `key` 不与 AISHELL-1 train 重叠。AISHELL-NER test 始终隔离，
+只供 stage6--8 最终评测，不参与 `best.pt` 选择。
 
 默认每个 epoch 结束验证一次：
 
@@ -150,8 +160,56 @@ bash run.sh stage3 stage4
 ```
 
 如果修改了输入数据、catalog 大小、chunk 大小或随机种子，应使用新的
-`OUTPUT_ROOT`，不要在旧实验目录上混跑。`CHUNK_MS` 与 `CHUNK_SIZE_SEC` 必须
+`OUTPUT_ROOT`，不要在旧实验目录上混跑。checkpoint 会保存验证协议名、AISHELL-NER
+dev manifest SHA-256、验证 seed 和子集大小；任一项不一致都会拒绝续训，防止把旧的
+随机子串 best Recall 与新的 gold-entity Recall 混合比较。`CHUNK_MS` 与 `CHUNK_SIZE_SEC` 必须
 表达同一个时长，stage0 会检查二者一致。
+
+## 训练性能与缓存
+
+stage3--5 默认启用以下训练热路径优化：
+
+- `AUDIO_BATCHING=packed`：同一 micro batch 的变长特征按有效长度拼接，一次调用
+  Qwen `audio_tower`，随后按官方卷积输出长度拆回各 utterance。设置为 `serial`
+  可恢复官方逐音频路径，用于精度对照；packed/serial 使用隔离的缓存 namespace。
+- `AUDIO_LOADER_WORKERS=4`：持久线程并行读取 WAV；PCM16 转 float32 使用 NumPy
+  `frombuffer`，不再逐 sample 执行 Python `int.from_bytes`。
+- `FEATURE_CACHE_DIR`：把 frozen 模式需要的 post-projector `[T,1024]` 或
+  warmstart/random 需要的 pre-projector `[T,896]` 写到分片磁盘缓存。首轮 miss
+  仍需运行 AuT，后续 epoch 和相同 Qwen/模式的实验直接读取缓存。
+- `TEXT_CACHE_MAX_ENTRIES=20000`：在每个 rank 的设备上缓存冻结 token embedding
+  mean pooling 结果；主系统的 4095 个负词仍会经过可训练文本 MLP，实验目标没有改变。
+- global-only 配置的 `local_weight=0` 在训练时直接跳过局部正负样本、hotword MLP
+  和 `B×T×K` logits；验证仍计算完整局部检索矩阵与 Recall@K，评估口径不变。
+- 训练损失在设备上累计到 epoch 末统一读取，避免每个 micro batch 因
+  `float(loss)` 触发三次 CUDA 同步；延迟测量用的 `cuda.synchronize()` 只保留在
+  显式推理 benchmark 路径。
+
+建议把 `FEATURE_CACHE_DIR` 放在所有训练 rank 可见的高速本地 NVMe 或共享 SSD：
+
+```bash
+FEATURE_CACHE_DIR=/fast/glclap_qwen_cache \
+AUDIO_BATCHING=packed AUDIO_LOADER_WORKERS=8 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 bash run.sh stage4
+```
+
+缓存 key 包含 Qwen 路径、固定 qwen-asr 版本、packed/serial 模式、音频绝对路径、
+文件大小和修改时间。更换权重但复用同一路径时，应改用新的
+`FEATURE_CACHE_DIR`。缓存只包含冻结特征，不包含数据集 WAV、训练 checkpoint
+或 embedding index。
+
+`train.jsonl` 的 `train_epoch` 事件额外记录：
+
+- `epoch_seconds` 和全局 `samples_per_second`；
+- host 侧 cache load、WAV I/O、encoder submit、cache write 与文本准备耗时；
+- 音频/文本缓存 hit、miss、write 和 entry 数；
+- 实际 `audio_batching` 模式。
+
+host 分阶段耗时用于定位数据等待，不能相加当作 GPU kernel 时间；端到端吞吐以
+`samples_per_second` 为准。第一次填充磁盘缓存时 cache write 包含一次合并后的
+GPU→CPU 等待，因此通常明显慢于第二个 epoch。多个变体同时冷启动时可能重复计算
+同一个 cache miss；要测稳定训练吞吐，应先让一个同 feature-kind 的变体完成首轮
+缓存填充。
 
 ## 多 GPU 使用
 
@@ -172,8 +230,9 @@ python -m torch.distributed.run --standalone --nproc_per_node=4 \
 
 训练数据在每个 epoch 做一次全局确定性 shuffle，再像 `DistributedSampler` 一样
 补齐并按 rank 等长分片。梯度累计期间使用 DDP `no_sync()`，只在 optimizer update
-同步。验证仅在 rank 0 的完整 dev 上运行，其他 rank 等待；日志、`best.pt`、
-`last.pt` 和 epoch checkpoint 也只由 rank 0 写，避免文件竞争。
+同步。验证集不补齐地分片到所有 rank，每条 dev 样本只评估一次，最后按样本数
+all-reduce 聚合 loss、Recall 和 MRR；日志、`best.pt`、`last.pt` 和 epoch
+checkpoint 仍只由 rank 0 写，避免文件竞争。
 
 配置中的 `training.global_batch_size=384` 是所有 GPU 合计的 batch，不是每卡
 batch。`micro_batch_size=8` 时自动得到：

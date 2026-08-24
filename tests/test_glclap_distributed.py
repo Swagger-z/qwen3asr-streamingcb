@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import unittest
 
-from asr.contextual.glclap_distributed import resolve_gradient_accumulation, shard_epoch_records
+from asr.contextual.glclap_distributed import (
+    resolve_gradient_accumulation,
+    shard_epoch_records,
+    shard_evaluation_records,
+)
 
 
 class DistributedBatchTests(unittest.TestCase):
@@ -41,6 +45,15 @@ class DistributedBatchTests(unittest.TestCase):
                 micro_batch_size=8,
                 world_size=7,
             )
+
+    def test_evaluation_shards_cover_each_example_exactly_once(self) -> None:
+        records = list(range(10))
+        shards = [
+            shard_evaluation_records(records, world_size=4, rank=rank)
+            for rank in range(4)
+        ]
+        self.assertEqual([len(shard) for shard in shards], [3, 3, 2, 2])
+        self.assertEqual(sorted(item for shard in shards for item in shard), records)
 
     def test_rank_shards_have_equal_length_and_deterministic_padding(self) -> None:
         records = list(range(10))

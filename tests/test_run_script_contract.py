@@ -32,7 +32,12 @@ class RunScriptContractTests(unittest.TestCase):
             "HKUST_WORD_FREQ",
             "MAGICDATA_WORD_FREQ",
             "AISHELL1_TRAIN_MANIFEST",
-            "AISHELL1_DEV_MANIFEST",
+            "AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT",
+            "AISHELL_NER_DEV_WAV_ROOT",
+            "AISHELL_NER_DEV_TARGET_CATALOG",
+            "AISHELL_NER_DEV_EVAL_MANIFEST",
+            "AISHELL_NER_DEV_ENTITY_MANIFEST",
+            "AISHELL_NER_DEV_PREPARATION_REPORT",
             "AISHELL_NER_ANNOTATED_TRANSCRIPT",
             "AISHELL_NER_WAV_ROOT",
             "AISHELL_NER_TARGET_CATALOG",
@@ -47,7 +52,8 @@ class RunScriptContractTests(unittest.TestCase):
 
     def test_training_requires_validation_and_uses_best_checkpoint(self) -> None:
         script = (Path(__file__).resolve().parents[1] / "run.sh").read_text(encoding="utf-8")
-        self.assertIn('--dev-manifest "${AISHELL1_DEV_MANIFEST}"', script)
+        self.assertIn('--dev-manifest "${AISHELL_NER_DEV_ENTITY_MANIFEST}"', script)
+        self.assertIn("--split dev", script)
         self.assertIn('evaluation.strategy=${EVAL_STRATEGY}', script)
         self.assertIn('evaluation.steps=${EVAL_STEPS}', script)
         self.assertIn('checkpoint="${output_dir}/best.pt"', script)

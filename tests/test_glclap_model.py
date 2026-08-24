@@ -29,9 +29,11 @@ if HAS_TORCH:
             self.ln_post = nn.LayerNorm(896)
             self.proj1 = nn.Linear(896, 896)
             self.proj2 = nn.Linear(896, 1024)
+            self.forward_calls = 0
 
         def forward(self, input_features, feature_lens=None):
             del feature_lens
+            self.forward_calls += 1
             hidden = self.ln_post(self.backbone(input_features))
             output = self.proj2(torch.nn.functional.gelu(self.proj1(hidden)))
             return SimpleNamespace(last_hidden_state=output)
@@ -77,6 +79,24 @@ class GLCLAPModelTests(unittest.TestCase):
         optimizer.step()
         self.assertEqual(before, module_parameter_hash(self.thinker))
 
+    def test_packed_audio_batch_uses_one_tower_call_and_matches_serial(self) -> None:
+        first = torch.randn(3, 4)
+        second = torch.randn(5, 4)
+        lengths = torch.tensor([3, 5])
+        serial = self.encoder.extract_audio_features_batch(
+            [first, second], lengths, packed=False
+        )
+        serial_calls = self.thinker.audio_tower.forward_calls
+        packed = self.encoder.extract_audio_features_batch(
+            [first, second], lengths, packed=True
+        )
+        self.assertEqual(serial_calls, 2)
+        self.assertEqual(self.thinker.audio_tower.forward_calls, 3)
+        self.assertEqual([tuple(item.post_projector.shape) for item in packed], [(3, 1024), (5, 1024)])
+        for expected, actual in zip(serial, packed):
+            self.assertTrue(torch.allclose(expected.pre_projector, actual.pre_projector))
+            self.assertTrue(torch.allclose(expected.post_projector, actual.post_projector))
+
     def test_training_forward_exposes_all_ddp_trainables(self) -> None:
         model = GLCLAPRetrieverModel(self.encoder, mode="qwen_post_projector_frozen")
         features = self.encoder.extract_audio_features(torch.randn(5, 4), torch.tensor([5]))
@@ -95,6 +115,22 @@ class GLCLAPModelTests(unittest.TestCase):
         (audio[0].sum() + transcripts.sum() + hotwords.sum() + temperature).backward()
         self.assertIsNotNone(model.log_temperature.grad)
 
+
+    def test_global_only_loss_can_skip_local_similarity(self) -> None:
+        audio = torch.nn.functional.normalize(torch.randn(2, 4, 8), dim=-1)
+        transcripts = torch.nn.functional.normalize(torch.randn(2, 8), dim=-1)
+        output = glclap_loss(
+            audio,
+            transcripts,
+            torch.empty((0, 8)),
+            torch.eye(2, dtype=torch.bool),
+            torch.empty((2, 0), dtype=torch.bool),
+            temperature=torch.tensor(0.07),
+            local_weight=0.0,
+            compute_local=False,
+        )
+        self.assertEqual(tuple(output.local_logits.shape), (2, 0))
+        self.assertEqual(float(output.local_loss), 0.0)
 
     def test_global_local_loss_and_multi_positive_mask(self) -> None:
         audio = torch.nn.functional.normalize(torch.randn(2, 4, 8), dim=-1).requires_grad_()

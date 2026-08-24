@@ -17,7 +17,7 @@ LLM-ASR work lives in `asr.backends` and `asr.contextual`.
 - Multi-path tokenizer trie and confidence-gated sparse vLLM logits processor
 - Accumulated-audio Qwen3-ASR adapter with strict dependency version checks
 - GLCLAP dual-adapter retrieval, Qwen-projector initialization ablations, exact 10k Top-50 index, and streaming retrieval CLI
-- Single-node multi-GPU GLCLAP training with torchrun/DDP, global-batch preservation, rank-sharded data, and rank-0 validation/checkpointing
+- Single-node multi-GPU GLCLAP training with torchrun/DDP, global-batch preservation, rank-sharded train/dev data, all-rank validation, packed audio encoding, and frozen-feature caches
 - Deterministic HKUST/MagicData-style word-frequency merging and leakage-safe 10k catalog preparation
 - Transcript probe, generic frozen-AuT sidecar, phoneme head training/extraction tools
 - Streaming session, JSONL traces, boundary-stress WAV builder, BWER/UWER and bootstrap evaluation
@@ -192,11 +192,12 @@ and tests:
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/aishell1/train.jsonl
-export AISHELL1_DEV_MANIFEST=/data/aishell1/dev.jsonl
+export AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.dev.txt
+export AISHELL_NER_DEV_WAV_ROOT=/data/AISHELL-1/wav/dev
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 
-# Build train negatives and deterministically parse existing AISHELL-NER labels.
+# Build train negatives and parse AISHELL-NER dev/test gold entities separately.
 bash run.sh stage0 stage1
 # Add offline acoustic timestamps for the boundary experiment.
 INSTALL_DEPS=1 bash run_aligner.sh all
@@ -205,15 +206,20 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 ```
 ```bash
 # A single experiment on four visible GPUs; global batch remains 384.
+# Put frozen Qwen features on fast shared storage so later epochs skip AuT.
+FEATURE_CACHE_DIR=/fast/glclap_qwen_cache \
 CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 RUN_ABLATIONS=0 \
   bash run.sh stage4
 ```
 
 
 See `docs/glclap_runbook.md` for every stage, input schema, resume behavior,
-ablation switch, and output path. Training requires a non-overlapping dev
-manifest and supports either epoch-end validation or validation every fixed
-number of optimizer updates; downstream indexing uses the best Recall@50 checkpoint.
+ablation switch, and output path. Validation uses non-overlapping AISHELL-NER dev
+gold entities and can run at epoch end or every fixed number of optimizer updates;
+downstream indexing uses the best Recall@50 checkpoint.
+Training defaults to packed variable-length Qwen audio encoding, vectorized parallel
+WAV loading, cached frozen text embeddings, and a persistent pre/post-projector
+feature cache. Set `AUDIO_BATCHING=serial` for the official per-audio precision path.
 
 ## Tests
 

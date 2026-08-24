@@ -4,23 +4,25 @@
 是否依赖前序 stage。路径可以通过同名环境变量覆盖；数据、模型、索引和输出不提交
 Git。
 
-## 先区分八类数据
+## 先区分训练、验证和测试数据
 
 | 类别 | 例子 | 训练使用 | 评测使用 | 生成方式 |
 |---|---|---:|---:|---|
 | 原始 ASR 训练清单 | `data/aishell1/train.jsonl` | 是 | 否 | 从 AISHELL-1 train 转换 |
-| 原始 ASR 验证清单 | `data/aishell1/dev.jsonl` | checkpoint selection | 否 | 从 AISHELL-1 dev 转换 |
+| AISHELL-NER dev gold | `aishell_ner_transcript.dev.txt` | checkpoint selection | 否 | 数据集自带 PER/LOC/ORG marker |
+| dev 实体验证清单 | `dev_entities.jsonl` | checkpoint selection | 否 | stage1b 解析 gold marker |
 | 训练负词候选源 | HKUST/MagicData `word_freq.txt` | 是 | 可作 distractor 源 | 外部语料统计 |
 | 训练负词池 | `zh_train_10k.jsonl` | 是 | 否 | stage1a |
-| AISHELL-NER gold transcript | `aishell_ner_transcript.test.txt` | 否 | 是 | 数据集自带 PER/LOC/ORG marker |
-| 评测目标注册表 | `targets_test.jsonl` | 否 | 是 | stage1b 解析 gold marker |
-| 全量评测清单 | `test.jsonl` | 否 | 是 | stage1b，保留无实体 utterance |
-| 实体边界清单 | `test_entities.jsonl` | 否 | 是 | stage1b，仅实体 utterance/mention |
-| 评测检索库 | `aishell_ner_10k.jsonl` | 否 | 是 | stage1c：gold target + distractor |
+| AISHELL-NER test gold | `aishell_ner_transcript.test.txt` | 否 | 是 | 数据集自带 PER/LOC/ORG marker |
+| 评测目标注册表 | `targets_test.jsonl` | 否 | 是 | stage1c 解析 gold marker |
+| 全量评测清单 | `test.jsonl` | 否 | 是 | stage1c，保留无实体 utterance |
+| 实体边界清单 | `test_entities.jsonl` | 否 | 是 | stage1c，仅实体 utterance/mention |
+| 评测检索库 | `aishell_ner_10k.jsonl` | 否 | 是 | stage1d：gold target + distractor |
 
-`target-catalog` 是 AISHELL-NER gold surface form 的内部注册表，不是训练时抽取的
-local positive。默认训练 positive 仍由 `AISHELL1_TRAIN_MANIFEST.target` 按 epoch
-确定性随机截取。评测标注不得输入 stage1a。
+`target-catalog` 是 AISHELL-NER gold surface form 的内部注册表。训练 local positive
+仍由 `AISHELL1_TRAIN_MANIFEST.target` 按 epoch 确定性随机截取；验证 local positives
+改为直接读取 AISHELL-NER dev 的 `entities[].text`。AISHELL-NER test 标注不得进入
+训练或 checkpoint selection，dev/test 产物必须分开。
 
 ## 原始 ASR manifest 规范
 
@@ -67,24 +69,27 @@ manifest 同时写出两套字段，但以 `key/source/target` 为规范接口�
 默认 hybrid 协议每个 epoch 从 `text` 确定性抽一个 2--8 字连续子串作为 local
 positive。该文件不引用 AISHELL-NER test 标注。
 
-### 2b. `AISHELL1_DEV_MANIFEST`
+### 2b. AISHELL-NER dev gold 输入与验证清单
 
-来源：外部、独立准备。schema 与 train 完全相同：
+外部输入是 `AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT` 和
+`AISHELL_NER_DEV_WAV_ROOT`，分别对应官方 dev 标注和 AISHELL-1 dev WAV。
+
+stage1b 生成只保留含实体语音的 `AISHELL_NER_DEV_ENTITY_MANIFEST`：
 
 ```json
-{"key":"BAC009S0724W0121","source":"/data/aishell1/wav/dev/u.wav","target":"验证集人工转写"}
+{"key":"BAC...","source":"/abs/dev.wav","target":"中原地产首席分析师张大伟说","target_hotword_ids":["aishell-ner-..."],"entities":[{"text":"中原地产","entity_type":"ORG","hotword_id":"aishell-ner-..."}]}
 ```
 
-训练入口强制要求该文件，并拒绝任何与 train 重复的 `key`。验证 local positive
-使用固定 seed/utt_id 从 target 抽取一次，不随 epoch 改变。默认使用完整 dev；
-设置正数 `evaluation.max_samples` 才会选择固定子集。该集合只用于 loss、Recall/MRR 和
-`best.pt` 选择，不读取 AISHELL-NER test 标注，也不替代 stage8 最终评测。
+训练入口强制要求每条记录至少含一个 `entities[].text`，并拒绝与 train 重复的
+`key`。同一句内的全部不同 gold 实体共同作为 local positives；默认使用完整 dev，
+`evaluation.max_samples>0` 才固定抽取子集。该集合只用于 loss、Recall/MRR 和
+`best.pt` 选择，绝不读取 AISHELL-NER test 标注。
 
 
-### 3. `AISHELL_NER_ANNOTATED_TRANSCRIPT` / `AISHELL_NER_WAV_ROOT`
+### 3. AISHELL-NER test gold 输入
 
-来源：外部、独立准备。前者是 AISHELL-NER 官方 split 文件，后者是对应的
-AISHELL-1 WAV 根目录：
+外部输入 `AISHELL_NER_ANNOTATED_TRANSCRIPT` 是官方 test 标注，
+`AISHELL_NER_WAV_ROOT` 是对应的 AISHELL-1 test WAV 根目录：
 
 ```text
 BAC009S0764W0127 <中原地产>首席分析师[张大伟]说
@@ -92,9 +97,9 @@ BAC009S0764W0130 (北京)仅新增住宅土地供应十宗
 ```
 
 `[实体]`、`(实体)`、`<实体>` 分别是数据集自带的 PER、LOC、ORG gold 标记。
-stage1b 只解析标记、去除标记并绑定 WAV，不做词表匹配或 NER 推断。
+stage1c 只解析标记、去除标记并绑定 WAV，不做词表匹配或 NER 推断。
 
-### 4. Stage1b 派生的三个 gold 视图
+### 4. Stage1c 派生的三个 test gold 视图
 
 `AISHELL_NER_TARGET_CATALOG` 每个唯一 surface form 一条：
 
@@ -129,11 +134,13 @@ forced aligner 和边界压力实验使用。核心字段：
 word_freq.txt ────────────────┬─ stage1a ─> zh_train_10k.jsonl ─┬─ stage3
                               │                                  ├─ stage4
                               │                                  └─ stage5
-AISHELL-NER tagged transcript ── stage1b ─┬─> targets_test.jsonl ─┐
-AISHELL-1 test WAV ───────────────────────┼─> test.jsonl ─────────┴─ stage1c ─> aishell_ner_10k.jsonl ─> stage6
-                                         └─> test_entities.jsonl ─> run_aligner.sh
-                                                                    └─> test_aligned.jsonl ─> stage2
-                                                                                             └─> test_boundary.jsonl
+AISHELL-NER dev tags + dev WAV ── stage1b ─> dev_entities.jsonl ─> stage3--5 validation
+AISHELL-NER test tags + test WAV ─ stage1c ─┬─> targets_test.jsonl ─┐
+                                            ├─> test.jsonl ─────────┴─ stage1d ─> aishell_ner_10k.jsonl ─> stage6
+                                            └─> test_entities.jsonl ─> run_aligner.sh
+                                                                       └─> test_aligned.jsonl ─> stage2
+                                                                                                └─> test_boundary.jsonl
+dev/test utterance IDs and derived manifests remain disjoint throughout.
 checkpoints + evaluation catalog ─> stage6 index
 checkpoint + index + boundary manifest ─> stage7 retrieval JSONL ─> stage8 metrics
 ```
@@ -150,7 +157,7 @@ checkpoint + index + boundary manifest ─> stage7 retrieval JSONL ─> stage8 m
 
 依赖：独立，可先运行。不会生成任何 manifest。
 
-## Stage 1：训练池、gold 转换与评测库（三个隔离子步骤）
+## Stage 1：训练池、dev/test gold 转换与评测库（四个隔离子步骤）
 
 ### Stage 1a：训练负词池
 
@@ -176,26 +183,32 @@ python scripts/build_glclap_training_pool.py \
 消费者：stage3--5。该池在每个 batch 中采 4095 个共享 negatives。训练代码还会
 排除当前 batch transcript 中全部 2--8 字真实子串，避免假负例。
 
-### Stage 1b：解析 AISHELL-NER gold marker
+### Stage 1b：解析 AISHELL-NER dev gold marker
 
-输入：官方 tagged transcript + AISHELL-1 test WAV，不依赖 stage1a。
+输入：官方 dev tagged transcript + AISHELL-1 dev WAV，不依赖 stage1a。
 
 ```bash
 python scripts/prepare_aishell_ner.py \
-  --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.test.txt \
-  --wav-root /data/AISHELL-1/wav/test \
-  --target-catalog-output data/aishell_ner/targets_test.jsonl \
-  --eval-manifest-output data/aishell_ner/test.jsonl \
-  --entity-manifest-output data/aishell_ner/test_entities.jsonl \
-  --report data/aishell_ner/test_preparation_report.json \
-  --split test
+  --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.dev.txt \
+  --wav-root /data/AISHELL-1/wav/dev \
+  --target-catalog-output data/aishell_ner/targets_dev.jsonl \
+  --eval-manifest-output data/aishell_ner/dev.jsonl \
+  --entity-manifest-output data/aishell_ner/dev_entities.jsonl \
+  --report data/aishell_ner/dev_preparation_report.json \
+  --split dev
 ```
 
 输出是已有标签的三个内部视图和审计报告；`entity_labels_inferred=false`。
 
-### Stage 1c：评测 target+distractor catalog
+### Stage 1c：解析 AISHELL-NER test gold marker
 
-输入：两个 `word_freq.txt` 和 stage1b 的 target catalog/full eval manifest。与
+输入官方 test tagged transcript 与 AISHELL-1 test WAV。调用同一转换器并使用
+`--split test`，生成 `targets_test.jsonl`、`test.jsonl`、
+`test_entities.jsonl` 和独立审计报告。
+
+### Stage 1d：评测 target+distractor catalog
+
+输入：两个 `word_freq.txt` 和 stage1c 的 test target catalog/full eval manifest。与
 stage1a 没有数据依赖。
 
 ```bash
@@ -215,7 +228,7 @@ surface forms 及全量 test transcript 中实际出现的 2--8 字子串。消�
 
 ## 独立对齐流水线：`run_aligner.sh`
 
-输入：stage1b 的 target catalog + entity-only manifest + 原始音频 +
+输入：stage1c 的 test target catalog + entity-only manifest + 原始音频 +
 `Qwen/Qwen3-ForcedAligner-0.6B`。
 
 输出 `AISHELL_NER_ALIGNED_MANIFEST`：
@@ -245,7 +258,7 @@ cross-75 七条 PCM16 WAV 与 `test_boundary.jsonl`。每条输出继承 target 
 输入：
 
 - `AISHELL1_TRAIN_MANIFEST`（外部）
-- `AISHELL1_DEV_MANIFEST`（外部，key 与 train 不重叠）
+- `AISHELL_NER_DEV_ENTITY_MANIFEST`（stage1b gold，key 与 train 不重叠）
 - `NEGATIVE_CATALOG`（stage1a）
 - Qwen3-ASR 权重（外部）
 - `configs/glclap/global_only_clap.yaml`（仓库）
@@ -265,7 +278,7 @@ MRR；默认用 Recall@50 选 `best.pt`。
 - Qwen AuT、原 projector 和 LLM token embedding 冻结，仅训练双 MLP adapter
   与 temperature。
 - 多卡时每个 rank 独立加载冻结 Qwen，训练 utterance 等长分片，adapter/projector/
-  temperature 梯度由 DDP 同步；验证和文件写入仅发生在 rank 0。
+  temperature 梯度由 DDP 同步；验证在所有 rank 分片运行，文件仅由 rank 0 写入。
 - `global_batch_size=384` 固定所有 rank 合计的有效 batch，per-rank accumulation
   由 `384 / (micro_batch_size × WORLD_SIZE)` 自动计算。
 

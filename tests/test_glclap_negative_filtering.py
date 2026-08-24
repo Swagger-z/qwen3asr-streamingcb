@@ -8,6 +8,7 @@ from pathlib import Path
 
 from asr.contextual.glclap_data import (
     batch_negative_exclusions,
+    SharedNegativeSampler,
     sample_shared_negatives,
 )
 from asr.contextual.glclap_runtime import load_negative_vocabulary
@@ -30,6 +31,25 @@ class NegativeFilteringTests(unittest.TestCase):
             strict=True,
         )
         self.assertEqual(set(negatives), {"大学", "公司"})
+
+    def test_precanonicalized_sampler_matches_reference(self) -> None:
+        vocabulary = ["公司", "大学", "公司", "", "人工智能", "参观"]
+        expected = sample_shared_negatives(
+            vocabulary,
+            {"参观"},
+            count=3,
+            seed=7,
+            epoch=2,
+            step=5,
+        )
+        actual = SharedNegativeSampler(vocabulary).sample(
+            {"参观"},
+            count=3,
+            seed=7,
+            epoch=2,
+            step=5,
+        )
+        self.assertEqual(actual, expected)
 
     def test_invalid_exclusion_range_fails_early(self) -> None:
         with self.assertRaises(ValueError):

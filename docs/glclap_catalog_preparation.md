@@ -106,7 +106,7 @@ local positive 而被错误当作负例。
 
 ## 构建边界压力 manifest
 
-stage1b 的 `test_entities.jsonl` 已包含 gold entity text/type/character span；aligner
+stage1c 的 `test_entities.jsonl` 已包含 gold entity text/type/character span；aligner
 只为每个 mention 补充 `hotword_start_sec` 和 `hotword_end_sec`：
 
 ```bash

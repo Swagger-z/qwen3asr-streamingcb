@@ -192,11 +192,12 @@ and tests:
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/aishell1/train.jsonl
-export AISHELL1_DEV_MANIFEST=/data/aishell1/dev.jsonl
+export AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.dev.txt
+export AISHELL_NER_DEV_WAV_ROOT=/data/AISHELL-1/wav/dev
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 
-# Build train negatives and deterministically parse existing AISHELL-NER labels.
+# Build train negatives and parse AISHELL-NER dev/test gold entities separately.
 bash run.sh stage0 stage1
 # Add offline acoustic timestamps for the boundary experiment.
 INSTALL_DEPS=1 bash run_aligner.sh all
@@ -213,9 +214,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 RUN_ABLATIONS=0 \
 
 
 See `docs/glclap_runbook.md` for every stage, input schema, resume behavior,
-ablation switch, and output path. Training requires a non-overlapping dev
-manifest and supports either epoch-end validation or validation every fixed
-number of optimizer updates; downstream indexing uses the best Recall@50 checkpoint.
+ablation switch, and output path. Validation uses non-overlapping AISHELL-NER dev
+gold entities and can run at epoch end or every fixed number of optimizer updates;
+downstream indexing uses the best Recall@50 checkpoint.
 Training defaults to packed variable-length Qwen audio encoding, vectorized parallel
 WAV loading, cached frozen text embeddings, and a persistent pre/post-projector
 feature cache. Set `AUDIO_BATCHING=serial` for the official per-audio precision path.

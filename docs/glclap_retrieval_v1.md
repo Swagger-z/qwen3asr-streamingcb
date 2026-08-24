@@ -101,7 +101,7 @@ python scripts/build_glclap_evaluation_catalog.py \
 python scripts/train_glclap_retriever.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
   --manifest data/aishell1/train.jsonl \
-  --dev-manifest data/aishell1/dev.jsonl \
+  --dev-manifest data/aishell_ner/dev_entities.jsonl \
   --negative-catalog data/hotwords/zh_train_10k.jsonl \
   --output-dir outputs/glclap/frozen
 
@@ -128,14 +128,15 @@ python scripts/eval_hotword_retrieval.py \
 
 训练默认每卡 micro batch 为 8，全局有效 batch 为 384。单卡自动累计 48 步，
 4 卡累计 12 步，8 卡累计 6 步。训练入口支持 `torchrun` 单机多卡 DDP：各 rank
-独立加载冻结 Qwen、等长分片数据，并只在 optimizer update 同步梯度；rank 0
-独占验证、日志和 checkpoint 写入。`training.global_batch_size` 必须能被
+独立加载冻结 Qwen、等长分片数据，并只在 optimizer update 同步梯度；所有 rank
+分片验证，rank 0 独占日志和 checkpoint 写入。`training.global_batch_size` 必须能被
 `micro_batch_size × WORLD_SIZE` 整除。`run.sh` 可直接使用
 `CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 bash run.sh stage4`。
 
-训练必须提供独立 dev manifest，且其 `key` 不得与 train 重叠。默认
-`evaluation.strategy=epoch`，每轮结束计算 validation loss、Recall@1/5/10/20/50
-和 MRR，并按 Recall@50 保存 `best.pt`。若改为固定 optimizer step：
+训练必须提供 stage1b 从 AISHELL-NER dev gold marker 派生的
+`dev_entities.jsonl`，其 `key` 不得与 train 重叠。验证正样本直接读取每条记录的
+`entities[].text`，支持一条语音多个 gold 实体。默认每轮结束计算 validation loss、
+Recall@1/5/10/20/50 和 MRR，并按 Recall@50 保存 `best.pt`。
 
 ```bash
 python scripts/train_glclap_retriever.py ... \

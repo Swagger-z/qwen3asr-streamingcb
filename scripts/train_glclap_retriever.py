@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -25,9 +26,11 @@ from asr.config import load_config, require_mapping
 from asr.data.manifest import manifest_key, manifest_source, manifest_target, validate_manifest_schema
 from asr.contextual.glclap_cache import FrozenTextEmbeddingCache, QwenFeatureCache
 from asr.contextual.glclap_data import (
+    annotated_entity_positives,
     batch_negative_exclusions,
     deterministic_local_positive,
     equality_positive_mask,
+    membership_positive_mask,
     SharedNegativeSampler,
 )
 from asr.contextual.glclap_distributed import (
@@ -52,7 +55,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
     parser.add_argument("--manifest", required=True, help="AISHELL-1 JSONL: key/source/target")
-    parser.add_argument("--dev-manifest", required=True, help="held-out JSONL: key/source/target")
+    parser.add_argument(
+        "--dev-manifest",
+        required=True,
+        help="AISHELL-NER dev entity JSONL with key/source/target and entities[].text",
+    )
     parser.add_argument("--negative-catalog", required=True, help="JSONL, one term per line, or TERM COUNT text")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
@@ -227,17 +234,10 @@ def _evaluate(
     with torch.inference_mode():
         for batch_index, batch_records in enumerate(batched(records, batch_size)):
             transcripts = [manifest_target(record) for record in batch_records]
-            positives = [
-                deterministic_local_positive(
-                    transcript,
-                    utt_id=manifest_key(record),
-                    epoch=0,
-                    seed=seed,
-                    min_chars=local_min_chars,
-                    max_chars=local_max_chars,
-                )
-                for record, transcript in zip(batch_records, transcripts)
+            positive_groups = [
+                annotated_entity_positives(record) for record in batch_records
             ]
+            positives = [value for group in positive_groups for value in group]
             spoken_terms = batch_negative_exclusions(
                 transcripts,
                 min_chars=local_min_chars,
@@ -273,7 +273,7 @@ def _evaluate(
                     equality_positive_mask(transcripts, transcripts), device=device
                 )
                 local_mask = torch.as_tensor(
-                    equality_positive_mask(positives, candidates), device=device
+                    membership_positive_mask(positive_groups, candidates), device=device
                 )
                 losses = glclap_loss(
                     audio_frames,
@@ -408,6 +408,14 @@ def main() -> None:
     if not dev_records:
         raise ValueError("validation manifest is empty")
     validate_manifest_schema(dev_records)
+    for record_index, record in enumerate(dev_records, 1):
+        try:
+            annotated_entity_positives(record)
+        except ValueError as exc:
+            raise ValueError(
+                f"validation manifest record {record_index} is not an AISHELL-NER "
+                f"entity record: {exc}"
+            ) from exc
     overlapping_keys = {manifest_key(record) for record in records} & {
         manifest_key(record) for record in dev_records
     }
@@ -422,6 +430,14 @@ def main() -> None:
         fixed_dev_records = list(dev_records)
         random.Random(eval_seed).shuffle(fixed_dev_records)
         dev_records = fixed_dev_records[:eval_max_samples]
+    validation_protocol = {
+        "name": "aishell-ner-gold-entities-v1",
+        "manifest_sha256": hashlib.sha256(
+            Path(args.dev_manifest).read_bytes()
+        ).hexdigest(),
+        "seed": eval_seed,
+        "max_samples": eval_max_samples,
+    }
     negative_vocabulary = load_negative_vocabulary(args.negative_catalog)
     negative_sampler = SharedNegativeSampler(negative_vocabulary)
     model, _runtime, processor, payload = build_glclap_runtime(
@@ -482,6 +498,13 @@ def main() -> None:
         start_epoch = int(payload.get("epoch", -1)) + 1
         global_step = int(payload.get("global_step", 0))
         restored_state = payload.get("training_state") or {}
+        restored_protocol = restored_state.get("validation_protocol")
+        if restored_protocol != validation_protocol:
+            raise ValueError(
+                "resume checkpoint uses an incompatible validation protocol or "
+                "AISHELL-NER dev manifest; start a fresh experiment with a new "
+                "OUTPUT_ROOT"
+            )
         best_metric_name = str(restored_state.get("best_metric_name", best_metric_name))
         best_metric_value = float(restored_state.get("best_metric_value", best_metric_value))
         best_epoch = int(restored_state.get("best_epoch", best_epoch))
@@ -557,6 +580,7 @@ def main() -> None:
             "world_size": world_size,
             "global_batch_size": global_batch_size,
             "gradient_accumulation_steps": grad_accum,
+            "validation_protocol": validation_protocol,
         }
 
     def run_validation(epoch: int, trigger: str, log_stream: Any) -> None:

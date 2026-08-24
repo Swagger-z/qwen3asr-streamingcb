@@ -20,16 +20,24 @@ AISHELL-NER 官方 marker 到内部 gold catalog/manifest 的无推断转换见
 | `HKUST_WORD_FREQ` | `data/raw/hkust/word_freq.txt` | 每行 `词语 频次` |
 | `MAGICDATA_WORD_FREQ` | `data/raw/magicdata/word_freq.txt` | 每行 `词语 频次` |
 | `AISHELL1_TRAIN_MANIFEST` | `data/aishell1/train.jsonl` | `key/source/target` |
-| `AISHELL1_DEV_MANIFEST` | `data/aishell1/dev.jsonl` | 独立 AISHELL-1 dev，`key/source/target`；key 不得与 train 重叠 |
+| `AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.dev.txt` | 官方 dev `UTT_ID TAGGED_TRANSCRIPT` |
+| `AISHELL_NER_DEV_WAV_ROOT` | `data/raw/AISHELL-1/wav/dev` | 可递归扫描的 dev WAV 根目录 |
 | `AISHELL_NER_ANNOTATED_TRANSCRIPT` | `data/raw/AISHELL-NER/data/aishell_ner_transcript.test.txt` | 官方 `UTT_ID TAGGED_TRANSCRIPT` |
 | `AISHELL_NER_WAV_ROOT` | `data/raw/AISHELL-1/wav/test` | 可递归扫描的 test WAV 根目录 |
 
-stage1b 直接解析 AISHELL-NER 已有的 `[PER]`、`(LOC)`、`<ORG>` gold marker，
-不会根据热词表推断实体。它生成三个内部视图：
+stage1b 解析 AISHELL-NER dev，供 checkpoint validation；stage1c 独立解析 test，
+供最终论文评测。两步都只读取已有的 `[PER]`、`(LOC)`、`<ORG>` gold marker，
+不会根据热词表推断实体。
 
-| 派生变量 | 默认路径 | 消费者 |
+| dev 派生变量 | 默认路径 | 消费者 |
 |---|---|---|
-| `AISHELL_NER_TARGET_CATALOG` | `data/aishell_ner/targets_test.jsonl` | stage1c、aligner、建库 |
+| `AISHELL_NER_DEV_TARGET_CATALOG` | `data/aishell_ner/targets_dev.jsonl` | 审计 dev gold 实体 |
+| `AISHELL_NER_DEV_EVAL_MANIFEST` | `data/aishell_ner/dev.jsonl` | 全量 dev，包含无实体句 |
+| `AISHELL_NER_DEV_ENTITY_MANIFEST` | `data/aishell_ner/dev_entities.jsonl` | stage3--5 validation |
+
+| test 派生变量 | 默认路径 | 消费者 |
+|---|---|---|
+| `AISHELL_NER_TARGET_CATALOG` | `data/aishell_ner/targets_test.jsonl` | stage1d、aligner、建库 |
 | `AISHELL_NER_EVAL_MANIFEST` | `data/aishell_ner/test.jsonl` | 全量 test 评测，包含无实体句 |
 | `AISHELL_NER_ENTITY_MANIFEST` | `data/aishell_ner/test_entities.jsonl` | aligner 与边界压力实验 |
 
@@ -59,7 +67,8 @@ transcript 做批量对齐，并为每个 gold mention 补充时间范围；stag
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt
 export AISHELL1_TRAIN_MANIFEST=/data/manifests/aishell1_train.jsonl
-export AISHELL1_DEV_MANIFEST=/data/manifests/aishell1_dev.jsonl
+export AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.dev.txt
+export AISHELL_NER_DEV_WAV_ROOT=/data/AISHELL-1/wav/dev
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 export QWEN_MODEL=Qwen/Qwen3-ASR-0.6B
@@ -80,7 +89,7 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 | 阶段 | 作用 | 主要输出 |
 |---|---|---|
 | stage0 | Python、固定 Qwen/vLLM 版本、CUDA、源码和环境快照检查 | `outputs/glclap/run_metadata/` |
-| stage1 | 训练负词池（1a）、AISHELL-NER gold 转换（1b）、评测库（1c） | catalog、两个 manifest 与报告 |
+| stage1 | 训练负词池（1a）、AISHELL-NER dev/test gold 转换（1b/1c）、测试库（1d） | dev/test catalog、manifest 与报告 |
 | stage2 | 消费独立 aligner 产物，前置静音生成七种 2 秒边界样本 | `test_boundary.jsonl` 和 boundary WAV |
 | stage3 | 训练并验证 global-only CLAP 基线 | `outputs/glclap/global_only/{last,best}.pt` |
 | stage4 | 训练并验证冻结原 Qwen projector 的主系统 | `outputs/glclap/frozen/{last,best}.pt` |
@@ -92,10 +101,11 @@ bash run.sh stage2 stage3 stage4 stage5 stage6 stage7 stage8 stage9
 
 ## 训练期验证
 
-stage3--5 强制要求独立的 `AISHELL1_DEV_MANIFEST`。它与训练清单格式完全一致，
-训练入口会检查两者的 `key` 没有交集。dev local positive 按 `seed + utt_id` 固定
-抽取一次 2--8 字子串，所有验证轮次使用同一目标；它是训练期 checkpoint selection
-proxy，不替代 stage8 的 AISHELL-NER gold 实体最终评测。
+stage3--5 强制使用 stage1b 生成的 `AISHELL_NER_DEV_ENTITY_MANIFEST`。每条语音的
+local positives 直接来自 AISHELL-NER dev 的 `entities[].text`，不再从 transcript
+随机截取；同一句中的多个不同 gold 实体会共同标为正样本。训练入口拒绝没有实体标注
+的验证记录，并检查其 `key` 不与 AISHELL-1 train 重叠。AISHELL-NER test 始终隔离，
+只供 stage6--8 最终评测，不参与 `best.pt` 选择。
 
 默认每个 epoch 结束验证一次：
 
@@ -150,7 +160,9 @@ bash run.sh stage3 stage4
 ```
 
 如果修改了输入数据、catalog 大小、chunk 大小或随机种子，应使用新的
-`OUTPUT_ROOT`，不要在旧实验目录上混跑。`CHUNK_MS` 与 `CHUNK_SIZE_SEC` 必须
+`OUTPUT_ROOT`，不要在旧实验目录上混跑。checkpoint 会保存验证协议名、AISHELL-NER
+dev manifest SHA-256、验证 seed 和子集大小；任一项不一致都会拒绝续训，防止把旧的
+随机子串 best Recall 与新的 gold-entity Recall 混合比较。`CHUNK_MS` 与 `CHUNK_SIZE_SEC` 必须
 表达同一个时长，stage0 会检查二者一致。
 
 ## 训练性能与缓存

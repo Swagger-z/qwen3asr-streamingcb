@@ -26,10 +26,23 @@ BAC009S0764W0130 (北京)仅新增住宅土地供应十宗
 音频仍来自 AISHELL-1。转换器递归扫描 `--wav-root`，用 WAV 文件名 stem 与
 `UTT_ID` 一一匹配；缺失音频、重复 ID、空实体、未闭合或嵌套 marker 均直接失败。
 
-## Stage1b 转换
+## Stage1b/1c 分离转换
 
-`run.sh stage1` 会自动执行：
+`run.sh stage1` 先处理 dev，再独立处理 test：
 
+dev 用于 checkpoint validation：
+```bash
+python scripts/prepare_aishell_ner.py \
+  --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.dev.txt \
+  --wav-root /data/AISHELL-1/wav/dev \
+  --target-catalog-output data/aishell_ner/targets_dev.jsonl \
+  --eval-manifest-output data/aishell_ner/dev.jsonl \
+  --entity-manifest-output data/aishell_ner/dev_entities.jsonl \
+  --report data/aishell_ner/dev_preparation_report.json \
+  --split dev
+```
+
+test 只用于最终评测：
 ```bash
 python scripts/prepare_aishell_ner.py \
   --annotated-transcript /data/AISHELL-NER/data/aishell_ner_transcript.test.txt \
@@ -41,7 +54,8 @@ python scripts/prepare_aishell_ner.py \
   --split test
 ```
 
-这一步不调用 ASR、NER 模型或 forced aligner，也不会从外部词表匹配实体。
+两步都不调用 ASR、NER 模型或 forced aligner，也不会从外部词表匹配实体。
+训练验证只读 `dev_entities.jsonl` 的 `entities[].text`，不会读取 test 产物。
 
 ## 三个派生视图
 
@@ -67,6 +81,9 @@ python scripts/prepare_aishell_ner.py \
 ### Entity-only manifest
 
 `test_entities.jsonl` 只保留至少含一个 gold entity 的 utterance，供
+`dev_entities.jsonl` 同样只保留有实体的 dev 语音，训练验证将每条记录中全部不同
+`entities[].text` 作为 local positives，用它选择 `best.pt`。
+
 `run_aligner.sh` 和七种 chunk-boundary 压力样本使用。每个 mention 都有独立
 `mention_id`；同一句中同一个实体重复两次时不会被去重，forced alignment 会按
 `occurrence_index` 分别解析。
@@ -75,6 +92,8 @@ python scripts/prepare_aishell_ner.py \
 
 ```bash
 export AISHELL_NER_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.test.txt
+export AISHELL_NER_DEV_ANNOTATED_TRANSCRIPT=/data/AISHELL-NER/data/aishell_ner_transcript.dev.txt
+export AISHELL_NER_DEV_WAV_ROOT=/data/AISHELL-1/wav/dev
 export AISHELL_NER_WAV_ROOT=/data/AISHELL-1/wav/test
 export HKUST_WORD_FREQ=/data/hkust/word_freq.txt
 export MAGICDATA_WORD_FREQ=/data/magicdata/word_freq.txt

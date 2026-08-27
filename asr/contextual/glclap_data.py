@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import random
 import unicodedata
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -68,6 +68,40 @@ def batch_negative_exclusions(
     return excluded
 
 
+def annotated_entity_positives(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return deduplicated gold entity texts from an annotated manifest row.
+
+    The validation path intentionally consumes ``entities[].text`` produced by
+    :mod:`scripts.prepare_aishell_ner`; it never infers a hotword from the plain
+    transcript or from the negative catalog.
+    """
+
+    raw_entities = record.get("entities")
+    if not isinstance(raw_entities, Sequence) or isinstance(
+        raw_entities, (str, bytes)
+    ):
+        raise ValueError("annotated validation record requires an entities list")
+    positives: list[str] = []
+    seen: set[str] = set()
+    transcript = compact_transcript(str(record.get("target", record.get("text", ""))))
+    for index, raw_entity in enumerate(raw_entities):
+        if not isinstance(raw_entity, Mapping):
+            raise ValueError(f"entities[{index}] must be an object")
+        text = compact_transcript(str(raw_entity.get("text", "")))
+        if not text:
+            raise ValueError(f"entities[{index}] is missing non-empty text")
+        if transcript and text not in transcript:
+            raise ValueError(
+                f"entities[{index}] text {text!r} is absent from the transcript"
+            )
+        if text not in seen:
+            seen.add(text)
+            positives.append(text)
+    if not positives:
+        raise ValueError("annotated validation record contains no gold entities")
+    return tuple(positives)
+
+
 def sample_shared_negatives(
     vocabulary: Sequence[str],
     positives: Iterable[str],
@@ -89,7 +123,50 @@ def sample_shared_negatives(
     return tuple(generator.sample(available, count))
 
 
+class SharedNegativeSampler:
+    """Pre-canonicalized shared-negative sampler without per-step sorting."""
+
+    def __init__(self, vocabulary: Sequence[str]) -> None:
+        self.vocabulary = tuple(sorted({item for item in vocabulary if item}))
+
+    def sample(
+        self,
+        positives: Iterable[str],
+        count: int = 4095,
+        *,
+        seed: int = 42,
+        epoch: int = 0,
+        step: int = 0,
+        strict: bool = True,
+    ) -> tuple[str, ...]:
+        """Sample from the canonical vocabulary while excluding positives."""
+
+        excluded = set(positives)
+        available = [item for item in self.vocabulary if item not in excluded]
+        if strict and len(available) < count:
+            raise ValueError(
+                f"need {count} unique negatives after exclusion, found {len(available)}"
+            )
+        count = min(count, len(available))
+        generator = random.Random((int(seed) << 32) ^ (int(epoch) << 16) ^ int(step))
+        return tuple(generator.sample(available, count))
+
+
 def equality_positive_mask(left: Sequence[str], right: Sequence[str]) -> np.ndarray:
     """Build a multi-positive equality mask for duplicate-aware contrastive loss."""
 
     return np.asarray([[a == b for b in right] for a in left], dtype=np.bool_)
+
+
+def membership_positive_mask(
+    left: Sequence[Iterable[str]], right: Sequence[str]
+) -> np.ndarray:
+    """Build a multi-label positive mask for one or more gold terms per audio."""
+
+    groups = [set(values) for values in left]
+    if any(not values for values in groups):
+        raise ValueError("every local retrieval row requires at least one positive")
+    return np.asarray(
+        [[candidate in values for candidate in right] for values in groups],
+        dtype=np.bool_,
+    )

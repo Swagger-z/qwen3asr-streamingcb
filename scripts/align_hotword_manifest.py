@@ -133,7 +133,9 @@ def _alignment_items(result: Any) -> tuple[AlignmentItem, ...]:
 
 def _load_aligner(args: argparse.Namespace) -> Any:
     import torch
-    from qwen_asr import Qwen3ForcedAligner
+    from asr.qwen_compat import import_qwen_symbol
+
+    Qwen3ForcedAligner = import_qwen_symbol("Qwen3ForcedAligner")
 
     dtype = {
         "bfloat16": torch.bfloat16,

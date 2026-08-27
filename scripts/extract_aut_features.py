@@ -19,7 +19,9 @@ def main() -> None:
     args = parser.parse_args()
     try:
         import torch
-        from qwen_asr import Qwen3ASRModel
+        from asr.qwen_compat import import_qwen_symbol
+
+        Qwen3ASRModel = import_qwen_symbol("Qwen3ASRModel")
     except ImportError as exc:
         raise SystemExit("install the 'qwen' and 'probe' extras") from exc
     from asr.contextual.probes import AuTPhonemeProbe, resolve_qwen_audio_encoder

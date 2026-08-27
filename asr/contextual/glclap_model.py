@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .glclap import AudioEncoding
+from asr.qwen_compat import import_qwen_symbol
 
 try:  # Optional Linux CUDA dependency.
     import torch
@@ -101,9 +102,9 @@ def load_qwen_transformers(
         raise ImportError("Qwen GLCLAP requires PyTorch; install the 'probe' and 'qwen' extras")
     require_qwen_versions()
     try:
-        from qwen_asr import Qwen3ASRModel
+        Qwen3ASRModel = import_qwen_symbol("Qwen3ASRModel")
     except ImportError as exc:  # pragma: no cover - optional runtime.
-        raise ImportError("install qwen-asr==0.0.6") from exc
+        raise ImportError("install qwen-asr==0.0.6 and make its qwen_asr package importable") from exc
     wrapper = Qwen3ASRModel.from_pretrained(model_name_or_path, **kwargs)
     return wrapper.model, wrapper.processor
 
@@ -152,6 +153,14 @@ if nn is not None:
         return output
 
 
+    def _qwen_output_lengths(feature_lens: Any) -> Any:
+        """Mirror the pinned Qwen3-ASR convolutional output-length contract."""
+
+        remainder = feature_lens % 100
+        half = (remainder - 1) // 2 + 1
+        return ((half - 1) // 2 + 1 - 1) // 2 + 1 + (feature_lens // 100) * 13
+
+
     class QwenGLCLAPEncoder(nn.Module):
         """Frozen Qwen AuT/projector and LLM token-embedding feature source.
 
@@ -191,34 +200,45 @@ if nn is not None:
             self,
             input_features: Any,
             feature_lens: Any,
+            *,
+            measure_timing: bool = False,
         ) -> QwenAudioFeatures:
-            """Return detached ``[T,896]`` and ``[T,1024]`` features."""
+            """Return detached ``[T,896]`` and ``[T,1024]`` features.
+
+            CUDA synchronization is only enabled for explicit latency
+            measurement. Training calls remain asynchronous by default.
+            """
 
             captured: dict[str, Any] = {}
             timing: dict[str, float] = {}
             started = 0.0
 
             def capture_pre(_module: Any, _inputs: Any, output: Any) -> None:
-                _sync(output)
+                if measure_timing:
+                    _sync(output)
                 captured["pre"] = output.detach()
-                timing["aut_ms"] = (time.perf_counter() - started) * 1000.0
+                if measure_timing:
+                    timing["aut_ms"] = (time.perf_counter() - started) * 1000.0
 
             handle = self.audio_tower.ln_post.register_forward_hook(capture_pre)
             try:
-                _sync(input_features)
+                if measure_timing:
+                    _sync(input_features)
                 started = time.perf_counter()
                 with torch.no_grad():
                     output = self.audio_tower(input_features, feature_lens=feature_lens)
                 post = _last_hidden(output).detach()
-                _sync(post)
+                if measure_timing:
+                    _sync(post)
             finally:
                 handle.remove()
             if "pre" not in captured:
                 raise RuntimeError("Qwen ln_post hook did not observe audio features")
-            total_ms = (time.perf_counter() - started) * 1000.0
-            qwen_projector_ms = max(0.0, total_ms - timing.get("aut_ms", total_ms))
-            timing["qwen_projector_ms"] = qwen_projector_ms
-            timing["projector_ms"] = qwen_projector_ms
+            if measure_timing:
+                total_ms = (time.perf_counter() - started) * 1000.0
+                qwen_projector_ms = max(0.0, total_ms - timing.get("aut_ms", total_ms))
+                timing["qwen_projector_ms"] = qwen_projector_ms
+                timing["projector_ms"] = qwen_projector_ms
             pre = captured["pre"]
             if pre.ndim == 3 and pre.shape[0] == 1:
                 pre = pre[0]
@@ -227,6 +247,91 @@ if nn is not None:
             if pre.ndim != 2 or post.ndim != 2:
                 raise ValueError("Qwen audio features must resolve to [T, D]")
             return QwenAudioFeatures(pre, post, timing)
+
+        def extract_audio_features_batch(
+            self,
+            input_features: Sequence[Any],
+            feature_lens: Any,
+            *,
+            packed: bool = True,
+        ) -> list[QwenAudioFeatures]:
+            """Encode a variable-length audio batch with one packed tower call.
+
+            ``packed=False`` preserves the official serial feature-extraction
+            behavior for precision-sensitive comparisons.
+            """
+
+            if len(input_features) == 0:
+                return []
+            if int(feature_lens.numel()) != len(input_features):
+                raise ValueError("feature_lens must contain one length per audio")
+
+            trimmed: list[Any] = []
+            time_axes: list[int] = []
+            configured_mels = getattr(
+                getattr(self.audio_tower, "config", None), "num_mel_bins", None
+            )
+            for value, length_tensor in zip(input_features, feature_lens):
+                length = int(length_tensor)
+                if value.ndim != 2:
+                    raise ValueError("each Qwen input feature tensor must be rank 2")
+                if configured_mels and value.shape[0] == int(configured_mels):
+                    time_axis = 1
+                elif configured_mels and value.shape[-1] == int(configured_mels):
+                    time_axis = 0
+                elif value.shape[-1] >= length and value.shape[0] != length:
+                    time_axis = 1
+                elif value.shape[0] >= length:
+                    time_axis = 0
+                else:
+                    raise ValueError("feature length exceeds the input feature tensor")
+                trimmed.append(value[:, :length] if time_axis == 1 else value[:length])
+                time_axes.append(time_axis)
+            if len(set(time_axes)) != 1:
+                raise ValueError("all audio features in a batch must share layout")
+            if not packed or len(trimmed) == 1:
+                return [
+                    self.extract_audio_features(value, length.reshape(1))
+                    for value, length in zip(trimmed, feature_lens)
+                ]
+            packed_input = torch.cat(trimmed, dim=time_axes[0])
+
+            captured: dict[str, Any] = {}
+
+            def capture_pre(_module: Any, _inputs: Any, output: Any) -> None:
+                captured["pre"] = output.detach()
+
+            handle = self.audio_tower.ln_post.register_forward_hook(capture_pre)
+            try:
+                with torch.no_grad():
+                    output = self.audio_tower(packed_input, feature_lens=feature_lens)
+                post = _last_hidden(output).detach()
+            finally:
+                handle.remove()
+            if "pre" not in captured:
+                raise RuntimeError("Qwen ln_post hook did not observe packed audio features")
+            pre = captured["pre"]
+            if pre.ndim == 3 and pre.shape[0] == 1:
+                pre = pre[0]
+            if post.ndim == 3 and post.shape[0] == 1:
+                post = post[0]
+            if pre.ndim != 2 or post.ndim != 2:
+                raise ValueError("packed Qwen audio features must resolve to [sum(T), D]")
+            output_lens = _qwen_output_lengths(feature_lens)
+            if int(output_lens.sum()) != int(post.shape[0]):
+                if int(feature_lens.sum()) == int(post.shape[0]):
+                    output_lens = feature_lens
+                else:
+                    raise ValueError(
+                        "cannot split packed Qwen outputs: expected "
+                        f"{int(output_lens.sum())} frames, observed {post.shape[0]}"
+                    )
+            pre_parts = pre.split(output_lens.tolist(), dim=0)
+            post_parts = post.split(output_lens.tolist(), dim=0)
+            return [
+                QwenAudioFeatures(pre_part.detach(), post_part.detach())
+                for pre_part, post_part in zip(pre_parts, post_parts)
+            ]
 
         def embed_text(self, input_ids: Any, attention_mask: Any | None = None) -> Any:
             """Mean-pool frozen Qwen token embeddings to ``[B, 1024]``."""
@@ -356,6 +461,48 @@ if nn is not None:
 
             return self.adapters.text(self.encoder.embed_text(input_ids, attention_mask))
 
+        def encode_text_embeddings(self, pooled_embeddings: Any) -> Any:
+            """Map cached frozen Qwen text embeddings to normalized keys."""
+
+            if pooled_embeddings.shape[0] == 0:
+                return torch.empty(
+                    (0, self.embedding_dim),
+                    device=pooled_embeddings.device,
+                    dtype=torch.float32,
+                )
+            return self.adapters.text(pooled_embeddings.detach())
+
+        def forward(
+            self,
+            audio_features: Sequence[QwenAudioFeatures],
+            transcript_input_ids: Any,
+            transcript_attention_mask: Any,
+            hotword_input_ids: Any,
+            hotword_attention_mask: Any,
+            *,
+            transcript_embeddings: Any | None = None,
+            hotword_embeddings: Any | None = None,
+        ) -> tuple[list[Any], Any, Any, Any]:
+            """Encode a training batch through the DDP-visible retrieval branch.
+
+            Frozen Qwen audio/text feature extraction happens before this call;
+            all trainable adapters, the optional retrieval projector, and the
+            temperature remain registered on this module for gradient sync.
+            """
+
+            audio_sequences = [self.encode_audio_features(item) for item in audio_features]
+            transcript_keys = (
+                self.encode_text_embeddings(transcript_embeddings)
+                if transcript_embeddings is not None
+                else self.encode_text_tokens(transcript_input_ids, transcript_attention_mask)
+            )
+            hotword_keys = (
+                self.encode_text_embeddings(hotword_embeddings)
+                if hotword_embeddings is not None
+                else self.encode_text_tokens(hotword_input_ids, hotword_attention_mask)
+            )
+            return audio_sequences, transcript_keys, hotword_keys, self.temperature
+
         def optimizer_parameter_groups(
             self,
             adapter_lr: float = 3e-4,
@@ -451,7 +598,9 @@ if nn is not None:
             input_features = feature_batch["input_features"][0].to(self.device, dtype=self.dtype)
             attention_mask = feature_batch["attention_mask"][0].to(self.device)
             feature_len = attention_mask.sum().long().unsqueeze(0)
-            qwen_features = self.model.encoder.extract_audio_features(input_features, feature_len)
+            qwen_features = self.model.encoder.extract_audio_features(
+                input_features, feature_len, measure_timing=True
+            )
             with torch.inference_mode():
                 if self.model.retrieval_projector is None:
                     source = qwen_features.post_projector.detach()
@@ -528,6 +677,7 @@ def save_glclap_checkpoint(
     scheduler: Any | None = None,
     epoch: int = -1,
     global_step: int = 0,
+    training_state: Mapping[str, Any] | None = None,
 ) -> None:
     """Save retrieval-only parameters and reproducibility state."""
 
@@ -545,6 +695,7 @@ def save_glclap_checkpoint(
         "global_step": int(global_step),
         "optimizer": optimizer.state_dict() if optimizer is not None else None,
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
+        "training_state": dict(training_state or {}),
     }
     torch.save(payload, target)
 

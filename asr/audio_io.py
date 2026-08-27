@@ -5,9 +5,11 @@ from __future__ import annotations
 import wave
 from pathlib import Path
 
+import numpy as np
 
-def read_wav_mono_float(path: str | Path, expected_sample_rate: int = 16000) -> list[float]:
-    """Read uncompressed PCM16 WAV and average channels to mono float32 range."""
+
+def read_wav_mono_array(path: str | Path, expected_sample_rate: int = 16000) -> np.ndarray:
+    """Read an uncompressed PCM16 WAV into a contiguous mono ``float32`` array."""
 
     with wave.open(str(path), "rb") as reader:
         channels = reader.getnchannels()
@@ -19,7 +21,16 @@ def read_wav_mono_float(path: str | Path, expected_sample_rate: int = 16000) -> 
         raise ValueError("only uncompressed PCM16 WAV is supported")
     if sample_rate != expected_sample_rate:
         raise ValueError(f"expected {expected_sample_rate} Hz, found {sample_rate} Hz")
-    samples = [int.from_bytes(frames[index : index + 2], "little", signed=True) / 32768.0 for index in range(0, len(frames), 2)]
-    if channels == 1:
-        return samples
-    return [sum(samples[index : index + channels]) / channels for index in range(0, len(samples), channels)]
+    samples = np.frombuffer(frames, dtype="<i2").astype(np.float32)
+    samples *= 1.0 / 32768.0
+    if channels > 1:
+        if samples.size % channels:
+            raise ValueError("interleaved WAV sample count is not divisible by channel count")
+        samples = samples.reshape(-1, channels).mean(axis=1, dtype=np.float32)
+    return np.ascontiguousarray(samples)
+
+
+def read_wav_mono_float(path: str | Path, expected_sample_rate: int = 16000) -> list[float]:
+    """Read uncompressed PCM16 WAV and average channels to mono float32 range."""
+
+    return read_wav_mono_array(path, expected_sample_rate).tolist()

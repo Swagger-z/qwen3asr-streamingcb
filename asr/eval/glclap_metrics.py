@@ -57,6 +57,8 @@ def evaluate_glclap_records(
     items = list(records)
     metrics: dict[str, float | int] = {"utterances": len(items)}
     evaluable = [record for record in items if _gold(record)]
+    metrics["evaluable_utterances"] = len(evaluable)
+    metrics["target_entity_count"] = sum(len(_gold(record)) for record in evaluable)
     for k in ks:
         recalls = [record_recall_at_k(record, int(k)) for record in evaluable]
         precisions = []
@@ -67,6 +69,8 @@ def evaluate_glclap_records(
         recall = float(np.mean(recalls)) if recalls else 0.0
         precision = float(np.mean(precisions)) if precisions else 0.0
         metrics[f"recall_at_{k}"] = recall
+        # Hit@K is any-positive success; Recall@K measures entity coverage.
+        metrics[f"hit_at_{k}"] = float(np.mean([value > 0 for value in recalls])) if recalls else 0.0
         metrics[f"precision_at_{k}"] = precision
         metrics[f"f1_at_{k}"] = 2 * recall * precision / max(1e-12, recall + precision)
         metrics[f"false_alarm_rate_at_{k}"] = 1.0 - precision

@@ -78,6 +78,7 @@ def glclap_loss(
     frame_mask: Any | None = None,
     global_weight: float = 1.0,
     local_weight: float = 1.0,
+    compute_local: bool = True,
 ) -> GLCLAPLossOutput:
     """Compute weighted global and local bidirectional contrastive losses."""
 
@@ -95,8 +96,12 @@ def glclap_loss(
     hotword_keys = F.normalize(hotword_keys, p=2, dim=-1)
     scale = 1.0 / torch.as_tensor(temperature, device=audio_frames.device).clamp_min(1e-3)
     global_logits = (pooled_audio @ transcript_keys.T) * scale
-    local_logits = max_over_time_similarity(audio_frames, hotword_keys, frame_mask) * scale
     global_value = multi_positive_contrastive_loss(global_logits, global_positive_mask)
-    local_value = multi_positive_contrastive_loss(local_logits, local_positive_mask)
+    if not compute_local:
+        local_logits = audio_frames.new_empty((audio_frames.shape[0], hotword_keys.shape[0]))
+        local_value = audio_frames.sum() * 0.0
+    else:
+        local_logits = max_over_time_similarity(audio_frames, hotword_keys, frame_mask) * scale
+        local_value = multi_positive_contrastive_loss(local_logits, local_positive_mask)
     total = float(global_weight) * global_value + float(local_weight) * local_value
     return GLCLAPLossOutput(total, global_value, local_value, global_logits, local_logits)

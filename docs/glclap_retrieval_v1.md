@@ -101,18 +101,19 @@ python scripts/build_glclap_evaluation_catalog.py \
 python scripts/train_glclap_retriever.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
   --manifest data/aishell1/train.jsonl \
+  --dev-manifest data/aishell_ner/dev_entities.jsonl \
   --negative-catalog data/hotwords/zh_train_10k.jsonl \
   --output-dir outputs/glclap/frozen
 
 python scripts/build_glclap_index.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
-  --checkpoint outputs/glclap/frozen/last.pt \
+  --checkpoint outputs/glclap/frozen/best.pt \
   --catalog data/hotwords/aishell_ner_10k.jsonl \
   --output outputs/glclap/frozen/aishell_ner_10k.npz
 
 python scripts/decode_streaming_retrieval.py \
   --config configs/glclap/qwen_post_projector_frozen.yaml \
-  --checkpoint outputs/glclap/frozen/last.pt \
+  --checkpoint outputs/glclap/frozen/best.pt \
   --index outputs/glclap/frozen/aishell_ner_10k.npz \
   --manifest data/aishell_ner/test_boundary.jsonl \
   --output outputs/glclap/frozen/test.jsonl \
@@ -125,10 +126,22 @@ python scripts/eval_hotword_retrieval.py \
   --output outputs/glclap/frozen/metrics.json
 ```
 
-训练默认 micro batch 为 8、gradient accumulation 为 48，对应单进程有效
-batch 384。显存不足时可通过 `--override training.micro_batch_size=...` 和
-`training.gradient_accumulation_steps=...` 保持乘积不变。当前 v1 是单进程
-训练入口，多卡用于并行跑不同初始化/seed 实验。
+训练默认每卡 micro batch 为 8，全局有效 batch 为 384。单卡自动累计 48 步，
+4 卡累计 12 步，8 卡累计 6 步。训练入口支持 `torchrun` 单机多卡 DDP：各 rank
+独立加载冻结 Qwen、等长分片数据，并只在 optimizer update 同步梯度；所有 rank
+分片验证，rank 0 独占日志和 checkpoint 写入。`training.global_batch_size` 必须能被
+`micro_batch_size × WORLD_SIZE` 整除。`run.sh` 可直接使用
+`CUDA_VISIBLE_DEVICES=4,5,6,7 NUM_GPUS=4 bash run.sh stage4`。
+
+训练必须提供 stage1b 从 AISHELL-NER dev gold marker 派生的
+`dev_entities.jsonl`，其 `key` 不得与 train 重叠。验证正样本直接读取每条记录的
+`entities[].text`，支持一条语音多个 gold 实体。默认每轮结束计算 validation loss、
+Recall@1/5/10/20/50 和 MRR，并按 Recall@50 保存 `best.pt`。
+
+```bash
+python scripts/train_glclap_retriever.py ... \
+  --override evaluation.strategy=steps --override evaluation.steps=100
+```
 
 ## 流式与索引约束
 

@@ -99,6 +99,21 @@ spoken 2--8 character batch substring before sampling shared negatives. See
 
 ## Decode and evaluate
 
+For fixed-10k **DEV** retrieval with existing best/last checkpoints, run:
+
+```bash
+CUDA_VISIBLE_DEVICES=4 \
+EXP_DIR=/data/zhengjie/research/qwen3asr-posttraining/qwen3asr-streamingcb/outputs/glclap/frozen_bs8_100epoch \
+bash run_dev_test.sh all
+```
+
+This standalone runner prepares DEV gold labels, builds DEV-specific indexes,
+and writes separate whole-audio offline and accumulated-audio streaming results.
+It reports both any-entity Hit@K and entity Recall@K with the test evaluator.
+No training or forced alignment is performed. See
+[DEV formal test runbook](docs/glclap_dev_formal_test.md) for stage inputs,
+file schemas, reuse of prepared DEV manifests, and best/last selection.
+
 Dataset-facing manifests use one JSON object per line with the canonical fields
 `key`, `source`, and `target`, for example:
 

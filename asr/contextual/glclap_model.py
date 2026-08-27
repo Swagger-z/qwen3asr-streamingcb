@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from .glclap import AudioEncoding
+from asr.qwen_compat import import_qwen_symbol
 
 try:  # Optional Linux CUDA dependency.
     import torch
@@ -101,9 +102,9 @@ def load_qwen_transformers(
         raise ImportError("Qwen GLCLAP requires PyTorch; install the 'probe' and 'qwen' extras")
     require_qwen_versions()
     try:
-        from qwen_asr import Qwen3ASRModel
+        Qwen3ASRModel = import_qwen_symbol("Qwen3ASRModel")
     except ImportError as exc:  # pragma: no cover - optional runtime.
-        raise ImportError("install qwen-asr==0.0.6") from exc
+        raise ImportError("install qwen-asr==0.0.6 and make its qwen_asr package importable") from exc
     wrapper = Qwen3ASRModel.from_pretrained(model_name_or_path, **kwargs)
     return wrapper.model, wrapper.processor
 

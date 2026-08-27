@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol, Sequence
 
 from asr.contextual.catalog import TokenizerLike
+from asr.qwen_compat import import_qwen_asr, import_qwen_symbol
 
 
 @dataclass(frozen=True)
@@ -63,7 +64,7 @@ class QwenVLLMBackend:
 
         try:
             import importlib.metadata as metadata
-            from qwen_asr import Qwen3ASRModel
+            Qwen3ASRModel = import_qwen_symbol("Qwen3ASRModel")
         except ImportError as exc:  # pragma: no cover - optional runtime.
             raise ImportError("install the 'qwen' extra on Linux CUDA") from exc
         cls._require_version(metadata, "qwen-asr", cls.EXPECTED_QWEN_ASR_VERSION)
@@ -81,9 +82,10 @@ class QwenVLLMBackend:
     @staticmethod
     def _load_parser() -> Any:
         try:
-            from qwen_asr.inference.utils import parse_asr_output
+            import importlib
 
-            return parse_asr_output
+            module = import_qwen_asr()
+            return getattr(importlib.import_module(f"{module.__name__}.inference.utils"), "parse_asr_output")
         except ImportError:
             return None
 

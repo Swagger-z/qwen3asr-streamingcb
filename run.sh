@@ -345,6 +345,7 @@ stage2() {
   mkdir -p "${BOUNDARY_WAV_DIR}" "$(dirname -- "${BOUNDARY_MANIFEST}")"
   "${PYTHON_BIN}" scripts/build_boundary_stress.py \
     --manifest "${AISHELL_NER_ALIGNED_MANIFEST}" \
+    --source-manifest "${AISHELL_NER_ENTITY_MANIFEST}" \
     --output-dir "${BOUNDARY_WAV_DIR}" \
     --output-manifest "${BOUNDARY_MANIFEST}" \
     --chunk-ms "${CHUNK_MS}"

@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from .replay import ReplayClock
+
 import numpy as np
 
 
@@ -37,6 +39,7 @@ class RetrievalBatch:
     timings_ms: Mapping[str, float] = field(default_factory=dict)
     chunk_id: int = -1
     is_final: bool = False
+    timeline: Mapping[str, float | str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-compatible representation for traces and manifests."""
@@ -282,6 +285,7 @@ class AccumulatedAudioRetrievalSession:
         chunk_size_sec: float = 2.0,
         sample_rate: int = 16000,
         top_k: int = 50,
+        refresh_clock: ReplayClock | None = None,
     ) -> None:
         if chunk_size_sec <= 0:
             raise ValueError("chunk_size_sec must be positive")
@@ -292,6 +296,7 @@ class AccumulatedAudioRetrievalSession:
         self.chunk_size_sec = float(chunk_size_sec)
         self.sample_rate = int(sample_rate)
         self.top_k = int(top_k)
+        self.refresh_clock = refresh_clock
         self.chunk_samples = max(1, round(self.chunk_size_sec * self.sample_rate))
         self._audio_accum: list[float] = []
         self._processed_samples = 0
@@ -343,6 +348,7 @@ class AccumulatedAudioRetrievalSession:
         return batch
 
     def _refresh(self, sample_count: int, *, is_final: bool) -> RetrievalBatch:
+        stamp = self.refresh_clock.start(sample_count) if self.refresh_clock else None
         encode_started = time.perf_counter()
         encoded = self.encoder.encode_pcm(self._audio_accum[:sample_count])
         encode_ms = (time.perf_counter() - encode_started) * 1000.0
@@ -354,8 +360,11 @@ class AccumulatedAudioRetrievalSession:
             timings = {}
         timings["encode_ms"] = encode_ms
         found = self._index.search(frames, top_k=self.top_k)
+        timeline = self.refresh_clock.finish(stamp) if stamp is not None else {}
         timings.update(found.timings_ms)
         timings["total_ms"] = encode_ms + float(found.timings_ms.get("search_ms", 0.0))
+        timings["processing_ms"] = (float(timeline["processing_sec"]) * 1000 if timeline
+                                     else (time.perf_counter() - encode_started) * 1000)
         batch = RetrievalBatch(
             accumulated_audio_sec=sample_count / self.sample_rate,
             frame_count=found.frame_count,
@@ -363,6 +372,7 @@ class AccumulatedAudioRetrievalSession:
             timings_ms=timings,
             chunk_id=self._chunk_id,
             is_final=is_final,
+            timeline=timeline,
         )
         self._chunk_id += 1
         self._last_batch = batch
@@ -371,6 +381,8 @@ class AccumulatedAudioRetrievalSession:
     def reset(self) -> None:
         """Clear all stream-local audio and timing state."""
 
+        if self.refresh_clock is not None:
+            self.refresh_clock.reset()
         self._audio_accum = []
         self._processed_samples = 0
         self._chunk_id = 0

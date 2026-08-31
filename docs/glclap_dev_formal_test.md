@@ -4,6 +4,10 @@
 checkpoint，不训练模型、不运行 aligner、不生成边界音频。默认保留每句话的
 全部 AISHELL-NER gold entity ID，输出离线和累计音频流式检索结果。
 
+本文主要报告句末检索质量。需要 deadline recall 和发现延迟时，
+准备离线实体时标，再执行 SPLIT=dev bash run_online_eval.sh all。
+详见[在线评测入口](glclap_online_evaluation.md)。
+
 ## 直接运行
 
 在 Linux CUDA 仓库根目录，激活安装了项目依赖的环境后运行：

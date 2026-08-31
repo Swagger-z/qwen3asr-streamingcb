@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from .timed_entities import validate_boundary
+
 
 @dataclass(frozen=True)
 class BoundaryCondition:
@@ -84,19 +86,29 @@ def build_variants(
 ) -> list[dict[str, float | str]]:
     """Create all controlled variants and return manifest records."""
 
-    source_path = Path(source)
+    source_path = Path(source).resolve()
     records = []
     for condition in conditions:
         silence = silence_for_condition(word_start_sec, word_end_sec, chunk_sec, condition)
-        target = Path(output_dir) / f"{source_path.stem}.{condition.name}.wav"
-        prepend_pcm16_silence(source_path, target, silence)
+        # Actual WAV padding is quantized to PCM samples, not arbitrary floats.
+        with wave.open(str(source_path), "rb") as reader:
+            silence = round(silence * reader.getframerate()) / reader.getframerate()
+        target = (Path(output_dir) / f"{source_path.stem}.{condition.name}.wav").resolve()
         records.append(
             {
+                "source": str(target),
                 "audio": str(target),
                 "boundary_group": condition.name,
+                "boundary_chunk_sec": chunk_sec,
                 "leading_silence_sec": silence,
+                "hotword_start_sec": word_start_sec + silence,
+                "hotword_end_sec": word_end_sec + silence,
                 "word_start_sec": word_start_sec + silence,
                 "word_end_sec": word_end_sec + silence,
             }
         )
+    for record in records:
+        validate_boundary(record)
+    for record in records:
+        prepend_pcm16_silence(source_path, record["audio"], record["leading_silence_sec"])
     return records

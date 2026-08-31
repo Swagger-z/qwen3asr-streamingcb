@@ -43,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, help="Aligned output JSONL for stage2")
     parser.add_argument("--report", required=True, help="Alignment summary JSON")
     parser.add_argument("--trace-output", help="Optional full item-level alignment JSONL")
+    parser.add_argument("--utterance-output", help="Optional grouped, timed original-utterance JSONL")
     parser.add_argument("--model", default="Qwen/Qwen3-ForcedAligner-0.6B")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
@@ -166,16 +167,32 @@ def main() -> None:
     output_path = Path(args.output).resolve()
     report_path = Path(args.report).resolve()
     trace_path = Path(args.trace_output).resolve() if args.trace_output else None
+    destinations = [output_path, report_path]
+    if trace_path:
+        destinations.append(trace_path)
+    if args.utterance_output:
+        destinations.append(Path(args.utterance_output).resolve())
+    if len(set(destinations)) != len(destinations) or {manifest_path, catalog_path} & set(destinations):
+        raise ValueError("alignment outputs must be distinct and must not overwrite inputs")
     if output_path.exists() and not (args.resume or args.overwrite):
         raise FileExistsError(f"output exists; use --resume or --overwrite: {output_path}")
+    if args.utterance_output and Path(args.utterance_output).exists() and not (args.resume or args.overwrite):
+        raise FileExistsError(f"output exists: {args.utterance_output}")
 
     records = _read_manifest(manifest_path)
+    if len({manifest_key(record) for record in records}) != len(records):
+        raise ValueError("duplicate source utterance IDs in alignment manifest")
     catalog = HotwordCatalog.from_jsonl(catalog_path)
     for record in records:
         unknown = set(record_target_ids(record)) - set(catalog.entries)
         if unknown:
             raise ValueError(f"{manifest_key(record)}: unknown target IDs: {sorted(unknown)}")
-        record["audio"] = _resolve_audio(record, manifest_path.parent)
+        aliases = {_resolve_audio({"source": record[field]}, manifest_path.parent)
+                   for field in ("source", "audio") if field in record}
+        if len(aliases) != 1:
+            raise ValueError(f"{manifest_key(record)}: conflicting source/audio paths")
+        record["source"] = record["audio"] = aliases.pop()
+        record["key"] = record["utt_id"] = manifest_key(record)
 
     completed = _load_completed(output_path) if args.resume else set()
     pending = [
@@ -271,6 +288,13 @@ def main() -> None:
         if trace_stream:
             trace_stream.close()
 
+    if args.utterance_output:
+        from asr.data.timed_entities import prepare_timed_records
+        from asr.contextual.catalog_prep import write_jsonl
+
+        grouped, _focused = prepare_timed_records(records, _read_manifest(output_path))
+        write_jsonl(args.utterance_output, grouped)
+
     report = {
         "format_version": 1,
         "model": args.model,
@@ -278,6 +302,7 @@ def main() -> None:
         "manifest": str(manifest_path),
         "catalog": str(catalog_path),
         "output": str(output_path),
+        "utterance_output": args.utterance_output,
         "source_record_count": len(records),
         "pending_source_record_count": len(pending),
         "aligned_key_count": len(completed),

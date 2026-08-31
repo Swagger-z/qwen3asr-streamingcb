@@ -17,10 +17,41 @@ LLM-ASR work lives in `asr.backends` and `asr.contextual`.
 - Multi-path tokenizer trie and confidence-gated sparse vLLM logits processor
 - Accumulated-audio Qwen3-ASR adapter with strict dependency version checks
 - GLCLAP dual-adapter retrieval, Qwen-projector initialization ablations, exact 10k Top-50 index, and streaming retrieval CLI
+- Timestamp-validated online Top-K discovery, deadline recall, latency decomposition, fast/real-time replay, and utterance-clustered boundary bootstrap
 - Single-node multi-GPU GLCLAP training with torchrun/DDP, global-batch preservation, rank-sharded train/dev data, all-rank validation, packed audio encoding, and frozen-feature caches
 - Deterministic HKUST/MagicData-style word-frequency merging and leakage-safe 10k catalog preparation
 - Transcript probe, generic frozen-AuT sidecar, phoneme head training/extraction tools
 - Streaming session, JSONL traces, boundary-stress WAV builder, BWER/UWER and bootstrap evaluation
+
+## `feat/glclap-training-streamingdecode` version
+
+This branch is based on `feat/glclap-training-performance` at commit `6349a6c`.
+Relative to that baseline, this version adds and changes the following:
+
+- Fixes local contrastive supervision during training: every candidate that is
+  actually spoken in an utterance is marked positive after the same NFKC and
+  whitespace normalization used by sampling. A positive imported from another
+  batch row is therefore no longer pushed away as a false negative. Validation
+  and test labels remain the AISHELL-NER gold entities.
+- Adds timestamp-audited accumulated-audio retrieval with fast FIFO simulation
+  and real-time paced replay. Each refresh records audio cutoff, scheduled-ready,
+  processing-start, result-ready, queue wait, and complete retrieval service time.
+- Adds entity-level timely-detection evaluation for Top-1/5/10/20/50, including
+  first-complete-refresh recall, configurable deadline recall, miss/early/dropout
+  rates, discovery-latency decomposition, repeat-mention availability, and
+  original-utterance-clustered boundary bootstrap confidence intervals.
+- Repairs boundary data provenance: generated `source` and `audio` now reference
+  the padded WAV, all mention timestamps shift together, keys are unique per
+  utterance/mention/condition, and incompatible historical results are rejected.
+- Adds `run_online_eval.sh`, schema-v2 preparation/validation, result/config/input
+  hashes, per-entity and per-refresh JSONL outputs, CPU regression tests, and an
+  opt-in real-GPU replay-parity test. Existing checkpoints and indexes can be
+  reused when their checkpoint/catalog hashes match; no retraining is required
+  for decoding evaluation, while the training-label fix requires a fresh run to
+  change model weights.
+
+The full staged input/output contract and reproduction commands are in
+[the online evaluation runbook](docs/glclap_online_evaluation.md).
 
 ## Environment
 
@@ -114,6 +145,21 @@ No training or forced alignment is performed. See
 [DEV formal test runbook](docs/glclap_dev_formal_test.md) for stage inputs,
 file schemas, reuse of prepared DEV manifests, and best/last selection.
 
+For timely discovery, use the separate runner with existing gold and offline
+alignments. It does not retrain. Set RUN_ALIGNER=1 if alignments need generating,
+or SPLIT=dev to evaluate DEV:
+
+~~~bash
+CUDA_VISIBLE_DEVICES=4 SPLIT=test REPLAY_MODES="fast realtime" \
+EXP_DIR=/data/zhengjie/research/qwen3asr-posttraining/qwen3asr-streamingcb/outputs/glclap/frozen_bs8_100epoch \
+bash run_online_eval.sh all
+~~~
+
+New online metrics distinguish audio accumulation, feed wait, queue wait, and
+computation. Fast replay estimates a FIFO timeline; real-time replay measures it.
+Input schemas, stage dependencies, index reuse and tests are documented in the
+[online evaluation runbook](docs/glclap_online_evaluation.md).
+
 Dataset-facing manifests use one JSON object per line with the canonical fields
 `key`, `source`, and `target`, for example:
 
@@ -183,12 +229,13 @@ by streaming retrieval.
 
 ## Boundary stress set
 
-The input manifest must contain offline reference fields
-`hotword_start_sec`/`hotword_end_sec`:
+The input is the offline mention-alignment manifest plus the complete original
+entity manifest, or a prevalidated schema-v2 focused timed manifest:
 
 ```bash
 python scripts/build_boundary_stress.py \
   --manifest data/aligned_hotwords.jsonl \
+  --source-manifest data/aishell_ner/test_entities.jsonl \
   --output-dir data/boundary_wav \
   --output-manifest data/boundary_test.jsonl \
   --chunk-ms 2000
@@ -196,6 +243,10 @@ python scripts/build_boundary_stress.py \
 
 This creates Center, B-400/B-200/B-100, and Cross-25/50/75 variants by
 prepending silence; the online runtime never invokes forced alignment.
+Both source/audio aliases point to the generated WAV; all entity timestamps
+shift together and keys are unique per source/mention/condition. Old boundary
+results affected by mismatching audio paths must be regenerated and retrieved
+again; adding timestamps to those results is not a valid repair.
 
 ## End-to-end staged experiment
 

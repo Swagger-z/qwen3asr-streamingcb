@@ -158,6 +158,27 @@ def equality_positive_mask(left: Sequence[str], right: Sequence[str]) -> np.ndar
     return np.asarray([[a == b for b in right] for a in left], dtype=np.bool_)
 
 
+def transcript_positive_mask(
+    transcripts: Sequence[str], candidates: Sequence[str]
+) -> np.ndarray:
+    """Return a ``[B, K]`` mask of candidates spoken in each transcript.
+
+    Match nonempty contiguous substrings after the same NFKC/whitespace
+    normalization as local-positive sampling. This includes positives supplied
+    by *other* batch rows, not just the span sampled for the current row.
+    Candidate order, duplicate columns and empty ``[B, 0]`` shapes are retained.
+    This training-only helper does not infer validation/test entity labels.
+    """
+
+    normalized_transcripts = [compact_transcript(text) for text in transcripts]
+    normalized_candidates = [compact_transcript(text) for text in candidates]
+    mask = np.zeros((len(transcripts), len(candidates)), dtype=np.bool_)
+    for row, transcript in enumerate(normalized_transcripts):
+        for column, candidate in enumerate(normalized_candidates):
+            mask[row, column] = bool(candidate) and candidate in transcript
+    return mask
+
+
 def membership_positive_mask(
     left: Sequence[Iterable[str]], right: Sequence[str]
 ) -> np.ndarray:

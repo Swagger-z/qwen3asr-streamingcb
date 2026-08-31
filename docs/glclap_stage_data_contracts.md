@@ -1,5 +1,8 @@
 # GLCLAP 实验逐 Stage 数据契约
 
+及时检出、延迟分解及 schema-v2 时标格式见
+[在线评测数据契约与运行入口](glclap_online_evaluation.md)。
+
 本文档是 `run.sh` 的强制数据接口说明。每个文件均标明来源、schema、消费者和
 是否依赖前序 stage。路径可以通过同名环境变量覆盖；数据、模型、索引和输出不提交
 Git。
@@ -238,20 +241,28 @@ surface forms 及全量 test transcript 中实际出现的 2--8 字子串。消�
 ```
 
 每个 gold mention 拆成一条记录；重复 surface form 按 `occurrence_index` 对齐。该
-步骤依赖 stage1b，但不修改实体标签，也不进入在线运行链路。
+步骤依赖 stage1c，但不修改实体标签，也不进入在线运行链路。
+新输出写入唯一 key/utt_id、一致 source/audio，并保留全部 mention 的
+all_entities 时标。--utterance-output 可生成逐原句聚合时标清单；
+prepare_online_manifest.py 也能核验、升级已有对齐产物。
 
 ## Stage 2：边界压力样本
 
-输入：`AISHELL_NER_ALIGNED_MANIFEST`。前序依赖是 stage1b 后运行的独立 aligner。
+输入：`AISHELL_NER_ALIGNED_MANIFEST` 和原始完整
+`AISHELL_NER_ENTITY_MANIFEST`。前序依赖是 stage1c 后运行的独立 aligner。
+通过 --source-manifest 核验实体覆盖、升级时标；也可直接输入 schema-v2 focused 清单。
 
 输出：每个对齐记录生成 center、b-400、b-200、b-100、cross-25、cross-50、
 cross-75 七条 PCM16 WAV 与 `test_boundary.jsonl`。每条输出继承 target ID，并新增：
 
 ```json
-{"boundary_group":"cross-50","leading_silence_sec":0.412,"word_start_sec":1.143,"word_end_sec":1.696}
+{"boundary_group":"cross-50","boundary_chunk_sec":2.0,"leading_silence_sec":0.9925,"hotword_start_sec":1.7235,"hotword_end_sec":2.2765,"word_start_sec":1.7235,"word_end_sec":2.2765}
 ```
 
 消费者：stage7。stage2 不训练模型。
+变体 source/audio 均指向生成后的 WAV，key/utt_id 按原句、mention、条件唯一确定。
+整句所有实体时标同步平移，保留原 WAV 路径/哈希和时长用于审计。
+旧边界路径不一致的结果必须重新生成并检索，不能只补标注。
 
 ## Stage 3：global-only CLAP 基线
 

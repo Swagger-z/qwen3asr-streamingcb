@@ -31,10 +31,50 @@ def main() -> None:
     parser.add_argument("--output")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--online", action="store_true", help="Require timestamps and validated replay clocks")
+    parser.add_argument("--timing-manifest", help="Audited timestamps for fingerprint-matched results")
+    parser.add_argument("--deadlines-ms", type=int, nargs="+", default=[0, 100, 200, 500, 1000, 2000])
+    parser.add_argument("--entity-output", help="Per-mention/K online JSONL")
+    parser.add_argument("--refresh-output", help="Per-refresh eligible-target recall JSONL")
     args = parser.parse_args()
 
     records = _load(args.input)
+    if args.timing_manifest:
+        if not args.online:
+            raise ValueError("--timing-manifest requires --online")
+        from asr.eval.online_retrieval_metrics import attach_entity_timing
+        records = attach_entity_timing(records, _load(args.timing_manifest))
+    online = None
+    if args.online:
+        from asr.eval.online_retrieval_metrics import evaluate_online_records
+        from asr.contextual.catalog_prep import write_jsonl
+        online, entity_rows, refresh_rows = evaluate_online_records(
+            records, deadlines_ms=args.deadlines_ms,
+            bootstrap_samples=args.bootstrap_samples, seed=args.seed,
+        )
+        from asr.data.timed_entities import sha256_file
+        online["inputs"] = {
+            "retrieval": {"path": str(Path(args.input).resolve()), "sha256": sha256_file(args.input)}
+        }
+        for name, path in (("timing_manifest", args.timing_manifest),
+                           ("retrieval_run", str(args.input) + ".run.json")):
+            if path and Path(path).is_file():
+                online["inputs"][name] = {"path": str(Path(path).resolve()), "sha256": sha256_file(path)}
+        online["implementation_sha256"] = sha256_file(
+            Path(__file__).resolve().parents[1] / "asr/eval/online_retrieval_metrics.py"
+        )
+        base = args.output or args.input + ".metrics.json"
+        entity_path = args.entity_output or base + ".entities.jsonl"
+        refresh_path = args.refresh_output or base + ".refreshes.jsonl"
+        protected = {Path(path).resolve() for path in (args.input, args.timing_manifest, args.baseline) if path}
+        destinations = [Path(path).resolve() for path in (entity_path, refresh_path, args.output) if path]
+        if len(set(destinations)) != len(destinations) or protected & set(destinations):
+            raise ValueError("metric outputs must be distinct from one another and inputs")
+        write_jsonl(entity_path, entity_rows)
+        write_jsonl(refresh_path, refresh_rows)
     metrics = evaluate_glclap_records(records)
+    if online is not None:
+        metrics["online"] = online
     gain = None
     ci_low = None
     if args.baseline:

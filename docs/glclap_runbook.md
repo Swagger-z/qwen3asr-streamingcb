@@ -1,5 +1,9 @@
 # GLCLAP 完整分阶段实验运行手册
 
+已有 checkpoint 的及时检出和延迟分解使用独立的
+[在线评测运行手册](glclap_online_evaluation.md)，无需重跑训练。
+run_online_eval.sh 的 stage0–4 与本文训练流水线编号独立。
+
 仓库根目录的 `run.sh` 串联了 catalog 构建、边界数据生成、四种模型训练、
 索引构建、累计音频检索、评测和压力测试。脚本面向 Linux CUDA 单机，训练
 支持单卡和 torchrun DDP；多张 GPU 既可用于同一实验，也可划分后并行运行不同实验。

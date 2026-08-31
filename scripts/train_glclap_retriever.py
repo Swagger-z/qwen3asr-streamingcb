@@ -31,6 +31,7 @@ from asr.contextual.glclap_data import (
     deterministic_local_positive,
     equality_positive_mask,
     membership_positive_mask,
+    transcript_positive_mask,
     SharedNegativeSampler,
 )
 from asr.contextual.glclap_distributed import (
@@ -738,7 +739,7 @@ def main() -> None:
                             equality_positive_mask(transcripts, transcripts), device=device
                         )
                         local_mask = torch.as_tensor(
-                            equality_positive_mask(positives, candidates), device=device
+                            transcript_positive_mask(transcripts, candidates), device=device
                         )
                         losses = glclap_loss(
                             audio_frames,

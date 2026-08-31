@@ -49,6 +49,17 @@ positive。负词文件可以是版本化 hotword JSONL、每行一个中文词�
 个不同负词，并排除完整 transcript、采样到的 positive，以及 transcript 中
 全部 2--8 字连续子串，防止真实说出的词成为假负例。
 
+训练 local positive mask 还会逐句检查最终候选列表：候选词经相同的 NFKC/
+去空白规范化后，只要完整连续出现在本句 transcript 中，就标为正样本，
+包括由其他 batch 样本带入的正词。例如“我在北京工作”本次抽中“工作”，
+同 batch 带入的“北京”仍是该句正样本；不能只用采样词相等判断。
+这一 mask 同时用于 audio-to-text 和 text-to-audio 损失。每句随机采样一个
+2--8 字子串、4095 个共享负词及 batch/梯度累积设置均不变；验证和测试仍
+使用原有 gold entity 标签，不因本次修复增加推断标签。
+
+无需重建负词库或冻结 Qwen 特征缓存。已有 checkpoint 可继续加载，但旧训练
+受到的错误监督不会被追溯修正；正式对照建议在新的输出目录重新训练。
+
 Dev/Test-AISHELL-NER manifest 在上述字段外增加：
 
 ```json

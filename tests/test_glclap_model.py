@@ -13,6 +13,7 @@ if HAS_TORCH:
     from torch import nn
 
     from asr.contextual.glclap_loss import glclap_loss, multi_positive_contrastive_loss
+    from asr.contextual.glclap_data import transcript_positive_mask
     from asr.contextual.glclap_model import (
         GLCLAPRetrieverModel,
         QwenGLCLAPEncoder,
@@ -150,6 +151,18 @@ class GLCLAPModelTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(output.loss))
         value = multi_positive_contrastive_loss(torch.zeros((2, 2)), global_mask)
         self.assertAlmostEqual(float(value), 0.0, places=6)
+
+    def test_spoken_cross_row_positive_is_not_pushed_away(self) -> None:
+        mask = torch.as_tensor(transcript_positive_mask(
+            ["我在北京工作", "北京欢迎你"], ["工作", "北京", "上海"]
+        ))
+        logits = torch.zeros((2, 3), requires_grad=True)
+        loss = multi_positive_contrastive_loss(logits, mask)
+        loss.backward()
+        self.assertTrue(torch.isfinite(loss))
+        self.assertTrue(torch.isfinite(logits.grad).all())
+        self.assertLess(float(logits.grad[0, 1]), 0.0)
+        self.assertGreater(float(logits.grad[0, 2]), 0.0)
 
 
 if __name__ == "__main__":

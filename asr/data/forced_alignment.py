@@ -186,7 +186,10 @@ def aligned_records_for_source(
 ) -> tuple[dict[str, object], ...]:
     """Expand one utterance into one aligned record per annotated entity mention."""
 
-    source_utt_id = str(record.get("source_utt_id", record.get("utt_id", "")))
+    from .manifest import manifest_key, manifest_source
+    from .timed_entities import stable_record_key
+
+    source_utt_id = str(record.get("source_utt_id", manifest_key(record)))
     if not source_utt_id:
         raise ValueError("manifest record is missing utt_id")
     mentions = record_target_mentions(record)
@@ -194,7 +197,7 @@ def aligned_records_for_source(
         raise ValueError(f"{source_utt_id}: no target_hotword_ids")
     all_target_ids = record_target_ids(record)
     aligned_records: list[dict[str, object]] = []
-    for target_index, mention in enumerate(mentions):
+    for mention in mentions:
         hotword_id = str(mention["hotword_id"])
         mention_id = str(mention["mention_id"])
         if hotword_id not in entries:
@@ -213,22 +216,21 @@ def aligned_records_for_source(
         )
         output = dict(record)
         output["source_utt_id"] = source_utt_id
-        if len(mentions) > 1:
-            safe_id = (
-                re.sub(r"[^0-9A-Za-z_.-]+", "_", mention_id).strip("_")
-                or str(target_index)
-            )
-            output["utt_id"] = f"{source_utt_id}__mention_{safe_id}"
-            output["all_target_hotword_ids"] = list(all_target_ids)
-            output["all_entities"] = [dict(value) for value in mentions]
-        else:
-            output["utt_id"] = source_utt_id
         output["target_hotword_ids"] = [hotword_id]
-        output["entities"] = [dict(mention)]
+        timed_mention = {**mention, "start_sec": round(span.start_time, 3),
+                         "end_sec": round(span.end_time, 3)}
+        output["entities"] = [timed_mention]
+        output["key"] = output["utt_id"] = stable_record_key(source_utt_id, mention_id)
+        output["source"] = output["audio"] = manifest_source(record)
+        output["focus_mention_id"] = mention_id
         output["aligned_hotword_id"] = hotword_id
         output["aligned_mention_id"] = mention_id
         output["aligned_hotword_variant"] = span.variant
         output["hotword_start_sec"] = round(span.start_time, 3)
         output["hotword_end_sec"] = round(span.end_time, 3)
         aligned_records.append(output)
+    timed_entities = [dict(row["entities"][0]) for row in aligned_records]
+    for row in aligned_records:
+        row["all_entities"] = timed_entities
+        row["all_target_hotword_ids"] = list(all_target_ids)
     return tuple(aligned_records)

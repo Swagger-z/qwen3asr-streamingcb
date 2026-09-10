@@ -52,6 +52,12 @@ Relative to that baseline, this version adds and changes the following:
 
 The full staged input/output contract and reproduction commands are in
 [the online evaluation runbook](docs/glclap_online_evaluation.md).
+The current experimental status, open gates, and the proposed parallel
+retriever-scaling / hotword-injection plan are recorded in
+[the 2026-09-03 experiment progress note](docs/experiment_progress_2026-09-03.md).
+The implemented AISHELL/MagicData/HKUST/LibriSpeech training and STOP evaluation
+pipeline is documented in the
+[multilingual GLCLAP runbook](docs/multilingual_retriever_runbook.md).
 
 ## Environment
 

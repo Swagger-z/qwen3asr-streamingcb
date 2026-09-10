@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import math
 import os
 import random
 import sys
 import time
+from collections import Counter, defaultdict
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -23,8 +24,16 @@ import numpy as np
 
 from asr.audio_io import read_wav_mono_array
 from asr.config import load_config, require_mapping
-from asr.data.manifest import manifest_key, manifest_source, manifest_target, validate_manifest_schema
+from asr.data.manifest import (
+    manifest_key,
+    manifest_language,
+    manifest_source,
+    manifest_target,
+    validate_manifest_schema,
+)
+from asr.data.manifest_dataset import ManifestDataset
 from asr.contextual.glclap_cache import FrozenTextEmbeddingCache, QwenFeatureCache
+from asr.contextual.catalog_prep import sha256_file
 from asr.contextual.glclap_data import (
     annotated_entity_positives,
     batch_negative_exclusions,
@@ -39,15 +48,41 @@ from asr.contextual.glclap_distributed import (
     shard_epoch_records,
     shard_evaluation_records,
 )
-from asr.contextual.glclap_loss import glclap_loss
+from asr.contextual.glclap_loss import glclap_loss, multilingual_glclap_loss
 from asr.contextual.glclap_model import save_glclap_checkpoint
+from asr.contextual.glclap_sampling import (
+    proportional_epoch_indices,
+    scheduled_corpus_counts,
+)
 from asr.contextual.glclap_validation import ValidationSchedule, retrieval_rank_metrics
 from asr.contextual.glclap_runtime import (
     batched,
     build_glclap_runtime,
-    jsonl_records,
     load_negative_vocabulary,
 )
+
+
+@dataclass(frozen=True)
+class ValidationSet:
+    """One named, single-language held-out retrieval set."""
+
+    name: str
+    language: str
+    path: Path
+    records: tuple[Mapping[str, Any], ...]
+    sha256: str
+
+
+def _named_path(value: str, *, default_name: str) -> tuple[str, Path]:
+    """Parse optional ``NAME=PATH`` while retaining legacy bare paths."""
+
+    if "=" in value:
+        name, raw_path = (part.strip() for part in value.split("=", 1))
+    else:
+        name, raw_path = default_name, value.strip()
+    if not name or not raw_path:
+        raise ValueError("named path must be NAME=PATH or a nonempty legacy PATH")
+    return name, Path(raw_path).resolve()
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,13 +90,19 @@ def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--manifest", required=True, help="AISHELL-1 JSONL: key/source/target")
+    parser.add_argument("--manifest", required=True, help="training JSONL: key/source/target")
     parser.add_argument(
         "--dev-manifest",
+        action="append",
         required=True,
-        help="AISHELL-NER dev entity JSONL with key/source/target and entities[].text",
+        help="repeatable [NAME=]PATH entity JSONL; bare PATH keeps legacy behavior",
     )
-    parser.add_argument("--negative-catalog", required=True, help="JSONL, one term per line, or TERM COUNT text")
+    parser.add_argument(
+        "--negative-catalog",
+        action="append",
+        required=True,
+        help="repeatable [LANG=]PATH vocabulary; a bare path is legacy zh",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument(
         "--feature-cache-dir",
@@ -201,8 +242,11 @@ def _evaluate(
     batch_size: int,
     negative_count: int,
     strict_negatives: bool,
+    language: str,
     local_min_chars: int,
     local_max_chars: int,
+    local_min_words: int,
+    local_max_words: int,
     seed: int,
     loss_cfg: Mapping[str, Any],
     device: Any,
@@ -236,13 +280,17 @@ def _evaluate(
         for batch_index, batch_records in enumerate(batched(records, batch_size)):
             transcripts = [manifest_target(record) for record in batch_records]
             positive_groups = [
-                annotated_entity_positives(record) for record in batch_records
+                annotated_entity_positives(record, language=language)
+                for record in batch_records
             ]
             positives = [value for group in positive_groups for value in group]
             spoken_terms = batch_negative_exclusions(
                 transcripts,
                 min_chars=local_min_chars,
                 max_chars=local_max_chars,
+                language=language,
+                min_words=local_min_words,
+                max_words=local_max_words,
             )
             negatives = negative_sampler.sample(
                 spoken_terms | set(positives),
@@ -274,7 +322,10 @@ def _evaluate(
                     equality_positive_mask(transcripts, transcripts), device=device
                 )
                 local_mask = torch.as_tensor(
-                    membership_positive_mask(positive_groups, candidates), device=device
+                    membership_positive_mask(
+                        positive_groups, candidates, language=language
+                    ),
+                    device=device,
                 )
                 losses = glclap_loss(
                     audio_frames,
@@ -356,6 +407,95 @@ def _merge_distributed_validation(metrics: Mapping[str, float | int], device: An
     return result
 
 
+def _load_validation_sets(
+    specs: Sequence[str], *, seed: int, max_samples: int
+) -> tuple[ValidationSet, ...]:
+    """Load, validate, and deterministically cap named entity manifests."""
+
+    result: list[ValidationSet] = []
+    seen_names: set[str] = set()
+    for spec in specs:
+        default_name = "default" if len(specs) == 1 else Path(spec).stem
+        name, path = _named_path(spec, default_name=default_name)
+        if name in seen_names:
+            raise ValueError(f"duplicate validation dataset name: {name!r}")
+        seen_names.add(name)
+        dataset = ManifestDataset(path)
+        records = list(dataset)
+        if not records:
+            raise ValueError(f"validation manifest is empty: {path}")
+        validate_manifest_schema(records)
+        languages = {manifest_language(record, default="zh") for record in records}
+        if len(languages) != 1:
+            raise ValueError(f"validation dataset {name!r} mixes languages: {languages}")
+        language = next(iter(languages))
+        for record_index, record in enumerate(records, 1):
+            try:
+                annotated_entity_positives(record, language=language)
+            except ValueError as exc:
+                raise ValueError(
+                    f"validation dataset {name!r} record {record_index} has invalid "
+                    f"gold entities: {exc}"
+                ) from exc
+        if max_samples:
+            random.Random(f"{seed}:{name}").shuffle(records)
+            records = records[:max_samples]
+        result.append(
+            ValidationSet(name, language, path, tuple(records), dataset.sha256)
+        )
+    return tuple(result)
+
+
+def _aggregate_validation_metrics(
+    datasets: Sequence[ValidationSet],
+    metrics_by_dataset: Mapping[str, Mapping[str, float | int]],
+) -> dict[str, Any]:
+    """Build micro totals plus equal-dataset and equal-language validation views."""
+
+    metric_names = (
+        "loss",
+        "global_loss",
+        "local_loss",
+        "recall_at_1",
+        "recall_at_5",
+        "recall_at_10",
+        "recall_at_20",
+        "recall_at_50",
+        "mrr",
+    )
+    total_examples = sum(int(metrics_by_dataset[item.name]["num_examples"]) for item in datasets)
+    aggregate: dict[str, Any] = {
+        "num_examples": total_examples,
+        "num_batches": sum(
+            int(metrics_by_dataset[item.name]["num_batches"]) for item in datasets
+        ),
+    }
+    for metric in metric_names:
+        numerator = sum(
+            float(metrics_by_dataset[item.name][metric])
+            * int(metrics_by_dataset[item.name]["num_examples"])
+            for item in datasets
+        )
+        aggregate[metric] = numerator / max(1, total_examples)
+    grouped: defaultdict[str, list[Mapping[str, float | int]]] = defaultdict(list)
+    for dataset in datasets:
+        grouped[dataset.language].append(metrics_by_dataset[dataset.name])
+    by_language: dict[str, dict[str, float]] = {}
+    for language, rows in sorted(grouped.items()):
+        by_language[language] = {
+            metric: sum(float(row[metric]) for row in rows) / len(rows)
+            for metric in metric_names
+        }
+    aggregate["by_dataset"] = {
+        dataset.name: dict(metrics_by_dataset[dataset.name]) for dataset in datasets
+    }
+    aggregate["by_language"] = by_language
+    aggregate["macro_language_recall_at_50"] = sum(
+        values["recall_at_50"] for values in by_language.values()
+    ) / max(1, len(by_language))
+    return aggregate
+
+
 def main() -> None:
     """Run deterministic global/local contrastive adapter training."""
 
@@ -401,46 +541,71 @@ def main() -> None:
     if distributed and requested_device.startswith("cuda"):
         runtime_config.setdefault("runtime", {})["device"] = f"cuda:{local_rank}"
 
-    records = jsonl_records(args.manifest)
-    if not records:
+    strict_multilingual = bool(train_cfg.get("require_multilingual_metadata", False))
+    records = ManifestDataset(
+        args.manifest, strict_multilingual=strict_multilingual
+    )
+    if not len(records):
         raise ValueError("training manifest is empty")
-    validate_manifest_schema(records)
-    dev_records = jsonl_records(args.dev_manifest)
-    if not dev_records:
-        raise ValueError("validation manifest is empty")
-    validate_manifest_schema(dev_records)
-    for record_index, record in enumerate(dev_records, 1):
-        try:
-            annotated_entity_positives(record)
-        except ValueError as exc:
-            raise ValueError(
-                f"validation manifest record {record_index} is not an AISHELL-NER "
-                f"entity record: {exc}"
-            ) from exc
-    overlapping_keys = {manifest_key(record) for record in records} & {
-        manifest_key(record) for record in dev_records
-    }
-    if overlapping_keys:
-        examples = ", ".join(sorted(overlapping_keys)[:5])
-        raise ValueError(f"train/dev manifests overlap on {len(overlapping_keys)} keys: {examples}")
     eval_seed = int(eval_cfg.get("seed", seed))
     eval_max_samples = int(eval_cfg.get("max_samples", 0))
     if eval_max_samples < 0:
         raise ValueError("evaluation.max_samples must be non-negative")
-    if eval_max_samples:
-        fixed_dev_records = list(dev_records)
-        random.Random(eval_seed).shuffle(fixed_dev_records)
-        dev_records = fixed_dev_records[:eval_max_samples]
+    validation_sets = _load_validation_sets(
+        args.dev_manifest, seed=eval_seed, max_samples=eval_max_samples
+    )
+    train_keys = set(records.keys)
+    for dataset in validation_sets:
+        overlapping_keys = train_keys & {
+            manifest_key(record) for record in dataset.records
+        }
+        if overlapping_keys:
+            examples = ", ".join(sorted(overlapping_keys)[:5])
+            raise ValueError(
+                f"train/{dataset.name} manifests overlap on "
+                f"{len(overlapping_keys)} keys: {examples}"
+            )
     validation_protocol = {
-        "name": "aishell-ner-gold-entities-v1",
-        "manifest_sha256": hashlib.sha256(
-            Path(args.dev_manifest).read_bytes()
-        ).hexdigest(),
+        "name": "multilingual-gold-entities-v1",
+        "datasets": [
+            {
+                "name": dataset.name,
+                "language": dataset.language,
+                "path": str(dataset.path),
+                "manifest_sha256": dataset.sha256,
+                "records": len(dataset.records),
+            }
+            for dataset in validation_sets
+        ],
         "seed": eval_seed,
         "max_samples": eval_max_samples,
     }
-    negative_vocabulary = load_negative_vocabulary(args.negative_catalog)
-    negative_sampler = SharedNegativeSampler(negative_vocabulary)
+    negative_paths: dict[str, Path] = {}
+    for spec in args.negative_catalog:
+        language, path = _named_path(spec, default_name="zh")
+        language = language.casefold()
+        if language not in {"zh", "en"}:
+            raise ValueError(f"negative catalog language must be zh or en, got {language!r}")
+        if language in negative_paths:
+            raise ValueError(f"duplicate negative catalog for language {language!r}")
+        negative_paths[language] = path
+    negative_vocabularies = {
+        language: load_negative_vocabulary(path)
+        for language, path in negative_paths.items()
+    }
+    negative_samplers = {
+        language: SharedNegativeSampler(vocabulary, language=language)
+        for language, vocabulary in negative_vocabularies.items()
+    }
+    required_languages = set(records.languages) | {
+        dataset.language for dataset in validation_sets
+    }
+    missing_negative_languages = required_languages - set(negative_samplers)
+    if missing_negative_languages:
+        raise ValueError(
+            "missing negative catalogs for languages: "
+            + ", ".join(sorted(missing_negative_languages))
+        )
     model, _runtime, processor, payload = build_glclap_runtime(
         runtime_config, checkpoint=args.resume
     )
@@ -472,7 +637,16 @@ def main() -> None:
         grad_accum = int(train_cfg.get("gradient_accumulation_steps", 48))
         global_batch_size = micro_batch * grad_accum * world_size
     epochs = int(train_cfg.get("epochs", 10))
-    records_per_rank = math.ceil(len(records) / world_size)
+    sampling_strategy = str(train_cfg.get("sampling_strategy", "proportional")).strip().lower()
+    if sampling_strategy != "proportional":
+        raise ValueError("training.sampling_strategy currently supports only proportional")
+    configured_epoch_samples = int(train_cfg.get("samples_per_epoch", 0))
+    if configured_epoch_samples < 0:
+        raise ValueError("training.samples_per_epoch must be non-negative")
+    epoch_sample_count = configured_epoch_samples or len(records)
+    if epoch_sample_count > len(records):
+        raise ValueError("training.samples_per_epoch cannot exceed the training manifest size")
+    records_per_rank = math.ceil(epoch_sample_count / world_size)
     batches_per_epoch = math.ceil(records_per_rank / micro_batch)
     updates_per_epoch = math.ceil(batches_per_epoch / grad_accum)
     total_updates = max(1, epochs * updates_per_epoch)
@@ -491,6 +665,21 @@ def main() -> None:
     best_metric_value = float("-inf")
     best_epoch = -1
     best_global_step = 0
+    training_protocol = {
+        "name": "multilingual-proportional-v1",
+        "training_manifest": records.protocol_summary(),
+        "sampling_strategy": sampling_strategy,
+        "samples_per_epoch": epoch_sample_count,
+        "seed": seed,
+        "negative_catalogs": {
+            language: {
+                "path": str(path),
+                "sha256": sha256_file(path),
+                "terms": len(negative_vocabularies[language]),
+            }
+            for language, path in sorted(negative_paths.items())
+        },
+    }
     if payload is not None:
         if payload.get("optimizer") is not None:
             optimizer.load_state_dict(payload["optimizer"])
@@ -506,6 +695,11 @@ def main() -> None:
                 "AISHELL-NER dev manifest; start a fresh experiment with a new "
                 "OUTPUT_ROOT"
             )
+        if restored_state.get("training_protocol") != training_protocol:
+            raise ValueError(
+                "resume checkpoint uses an incompatible training manifest, negative "
+                "catalog, or sampling protocol; start a fresh experiment"
+            )
         best_metric_name = str(restored_state.get("best_metric_name", best_metric_name))
         best_metric_value = float(restored_state.get("best_metric_value", best_metric_value))
         best_epoch = int(restored_state.get("best_epoch", best_epoch))
@@ -518,6 +712,19 @@ def main() -> None:
             json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        (output_dir / "protocol.snapshot.json").write_text(
+            json.dumps(
+                {
+                    "training_protocol": training_protocol,
+                    "validation_protocol": validation_protocol,
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     if distributed:
         torch.distributed.barrier()
     log_path = output_dir / "train.jsonl"
@@ -525,6 +732,8 @@ def main() -> None:
     strict_negatives = bool(train_cfg.get("strict_negative_count", True))
     local_min_chars = int(train_cfg.get("local_min_chars", 2))
     local_max_chars = int(train_cfg.get("local_max_chars", 8))
+    local_min_words = int(train_cfg.get("local_min_words", 1))
+    local_max_words = int(train_cfg.get("local_max_words", 4))
     train_local_enabled = float(loss_cfg.get("local_weight", 1.0)) != 0.0
     use_bf16 = bool(train_cfg.get("bf16", True)) and str(device).startswith("cuda")
     autocast = lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=use_bf16)
@@ -567,7 +776,8 @@ def main() -> None:
             dtype=next(model.encoder.audio_tower.parameters()).dtype,
         )
     if bool(train_cfg.get("prewarm_text_cache", True)):
-        text_cache.get(model, processor, negative_vocabulary)
+        for vocabulary in negative_vocabularies.values():
+            text_cache.get(model, processor, vocabulary)
     if eval_batch_size <= 0:
         raise ValueError("evaluation.batch_size must be positive")
     last_eval_global_step = -1
@@ -581,37 +791,45 @@ def main() -> None:
             "world_size": world_size,
             "global_batch_size": global_batch_size,
             "gradient_accumulation_steps": grad_accum,
+            "training_protocol": training_protocol,
             "validation_protocol": validation_protocol,
         }
 
     def run_validation(epoch: int, trigger: str, log_stream: Any) -> None:
         nonlocal best_metric_value, best_epoch, best_global_step, last_eval_global_step
-        local_dev_records = shard_evaluation_records(
-            dev_records, world_size=world_size, rank=rank
-        )
-        metrics = _evaluate(
-            model,
-            processor,
-            local_dev_records,
-            negative_sampler,
-            batch_size=eval_batch_size,
-            negative_count=eval_negative_count,
-            strict_negatives=eval_strict_negatives,
-            local_min_chars=local_min_chars,
-            local_max_chars=local_max_chars,
-            seed=eval_seed,
-            loss_cfg=loss_cfg,
-            device=device,
-            autocast=autocast,
-            audio_cache=audio_cache,
-            text_cache=text_cache,
-            audio_executor=audio_executor,
-            packed_audio=packed_audio,
-            rank=rank,
-            world_size=world_size,
-        )
-        if distributed:
-            metrics = _merge_distributed_validation(metrics, device)
+        metrics_by_dataset: dict[str, Mapping[str, float | int]] = {}
+        for dataset in validation_sets:
+            local_dev_records = shard_evaluation_records(
+                dataset.records, world_size=world_size, rank=rank
+            )
+            dataset_metrics = _evaluate(
+                model,
+                processor,
+                local_dev_records,
+                negative_samplers[dataset.language],
+                batch_size=eval_batch_size,
+                negative_count=eval_negative_count,
+                strict_negatives=eval_strict_negatives,
+                language=dataset.language,
+                local_min_chars=local_min_chars,
+                local_max_chars=local_max_chars,
+                local_min_words=local_min_words,
+                local_max_words=local_max_words,
+                seed=eval_seed,
+                loss_cfg=loss_cfg,
+                device=device,
+                autocast=autocast,
+                audio_cache=audio_cache,
+                text_cache=text_cache,
+                audio_executor=audio_executor,
+                packed_audio=packed_audio,
+                rank=rank,
+                world_size=world_size,
+            )
+            if distributed:
+                dataset_metrics = _merge_distributed_validation(dataset_metrics, device)
+            metrics_by_dataset[dataset.name] = dataset_metrics
+        metrics = _aggregate_validation_metrics(validation_sets, metrics_by_dataset)
         if best_metric_name not in metrics:
             raise ValueError(f"unknown evaluation.selection_metric: {best_metric_name}")
         current_metric = float(metrics[best_metric_name])
@@ -656,8 +874,16 @@ def main() -> None:
             training_model.train()
             if not distributed:
                 model.set_epoch(epoch)
-            shuffled = list(records)
-            random.Random(seed + epoch).shuffle(shuffled)
+            epoch_indices = proportional_epoch_indices(
+                records.indices_by_dataset,
+                seed=seed,
+                epoch=epoch,
+                samples_per_epoch=configured_epoch_samples or None,
+            )
+            epoch_corpus_counts = scheduled_corpus_counts(epoch_indices, records.corpora)
+            epoch_language_counts = dict(
+                sorted(Counter(records.languages[index] for index in epoch_indices).items())
+            )
             optimizer.zero_grad(set_to_none=True)
             running = torch.zeros(4, dtype=torch.float64, device=device)
             performance = {
@@ -668,39 +894,67 @@ def main() -> None:
                 "audio_cache_write_seconds": 0.0,
                 "text_prepare_seconds": 0.0,
             }
-            rank_records = shard_epoch_records(shuffled, world_size=world_size, rank=rank)
-            epoch_batches = list(batched(rank_records, micro_batch))
-            for batch_index, batch_records in enumerate(epoch_batches):
+            rank_indices = shard_epoch_records(
+                epoch_indices, world_size=world_size, rank=rank
+            )
+            epoch_batches = list(batched(rank_indices, micro_batch))
+            for batch_index, batch_indices in enumerate(epoch_batches):
+                batch_records = records.records_at(batch_indices)
                 transcripts = [manifest_target(record) for record in batch_records]
+                languages = [
+                    manifest_language(record, default="zh") for record in batch_records
+                ]
+                rows_by_language: defaultdict[str, list[int]] = defaultdict(list)
+                for row_index, language in enumerate(languages):
+                    rows_by_language[language].append(row_index)
+                candidates_by_language: dict[str, list[str]] = {}
                 if train_local_enabled:
-                    positives = [
-                        deterministic_local_positive(
-                            transcript,
-                            utt_id=manifest_key(record),
-                            epoch=epoch,
-                            seed=seed,
+                    for language, row_indices in sorted(rows_by_language.items()):
+                        group_records = [batch_records[index] for index in row_indices]
+                        group_transcripts = [transcripts[index] for index in row_indices]
+                        positives = [
+                            deterministic_local_positive(
+                                transcript,
+                                utt_id=manifest_key(record),
+                                epoch=epoch,
+                                seed=seed,
+                                min_chars=local_min_chars,
+                                max_chars=local_max_chars,
+                                language=language,
+                                min_words=local_min_words,
+                                max_words=local_max_words,
+                            )
+                            for record, transcript in zip(
+                                group_records, group_transcripts
+                            )
+                        ]
+                        spoken_terms = batch_negative_exclusions(
+                            group_transcripts,
                             min_chars=local_min_chars,
                             max_chars=local_max_chars,
+                            language=language,
+                            min_words=local_min_words,
+                            max_words=local_max_words,
                         )
-                        for record, transcript in zip(batch_records, transcripts)
-                    ]
-                    spoken_terms = batch_negative_exclusions(
-                        transcripts,
-                        min_chars=local_min_chars,
-                        max_chars=local_max_chars,
-                    )
-                    negatives = negative_sampler.sample(
-                        spoken_terms | set(positives),
-                        negative_count,
-                        seed=seed,
-                        epoch=epoch,
-                        step=batch_index * world_size + rank,
-                        strict=strict_negatives,
-                    )
-                    candidates = list(dict.fromkeys([*positives, *negatives]))
+                        negatives = negative_samplers[language].sample(
+                            spoken_terms | set(positives),
+                            negative_count,
+                            seed=seed,
+                            epoch=epoch,
+                            step=batch_index * world_size + rank,
+                            strict=strict_negatives,
+                        )
+                        candidates_by_language[language] = list(
+                            dict.fromkeys([*positives, *negatives])
+                        )
                 else:
-                    positives = [""] * len(batch_records)
-                    candidates = []
+                    candidates_by_language = {}
+                candidate_offsets: dict[str, tuple[int, int]] = {}
+                candidates: list[str] = []
+                for language in sorted(candidates_by_language):
+                    begin = len(candidates)
+                    candidates.extend(candidates_by_language[language])
+                    candidate_offsets[language] = (begin, len(candidates))
                 qwen_features, audio_timings = _audio_features_for_records(
                     model,
                     processor,
@@ -738,15 +992,29 @@ def main() -> None:
                         global_mask = torch.as_tensor(
                             equality_positive_mask(transcripts, transcripts), device=device
                         )
-                        local_mask = torch.as_tensor(
-                            transcript_positive_mask(transcripts, candidates), device=device
-                        )
-                        losses = glclap_loss(
+                        language_hotword_keys: dict[str, Any] = {}
+                        local_masks: dict[str, Any] = {}
+                        for language, row_indices in sorted(rows_by_language.items()):
+                            if language not in candidate_offsets:
+                                continue
+                            begin, end = candidate_offsets[language]
+                            language_hotword_keys[language] = hotword_keys[begin:end]
+                            group_transcripts = [transcripts[index] for index in row_indices]
+                            local_masks[language] = torch.as_tensor(
+                                transcript_positive_mask(
+                                    group_transcripts,
+                                    candidates_by_language[language],
+                                    language=language,
+                                ),
+                                device=device,
+                            )
+                        losses = multilingual_glclap_loss(
                             audio_frames,
                             transcript_keys,
-                            hotword_keys,
+                            language_hotword_keys,
                             global_mask,
-                            local_mask,
+                            local_masks,
+                            dict(rows_by_language) if train_local_enabled else {},
                             temperature=temperature,
                             frame_mask=frame_mask,
                             global_weight=float(loss_cfg.get("global_weight", 1.0)),
@@ -810,6 +1078,10 @@ def main() -> None:
                     "micro_batch_size": micro_batch,
                     "gradient_accumulation_steps": grad_accum,
                     "global_batch_size": global_batch_size,
+                    "sampling_strategy": sampling_strategy,
+                    "scheduled_samples": len(epoch_indices),
+                    "samples_by_corpus": epoch_corpus_counts,
+                    "samples_by_language": epoch_language_counts,
                     "audio_batching": audio_batching,
                     "epoch_seconds": epoch_seconds,
                     "samples_per_second": performance["samples"] / max(epoch_seconds, 1e-9),

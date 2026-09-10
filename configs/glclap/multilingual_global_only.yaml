@@ -1,0 +1,61 @@
+model:
+  qwen_model: Qwen/Qwen3-ASR-0.6B
+  qwen_dtype: bfloat16
+  initialization: qwen_post_projector_frozen
+  embedding_dim: 512
+
+loss:
+  temperature: 0.07
+  global_weight: 1.0
+  local_weight: 0.0
+
+training:
+  epochs: 10
+  adapter_lr: 0.0003
+  projector_lr: 0.00003
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  grad_clip: 1.0
+  bf16: true
+  micro_batch_size: 8
+  global_batch_size: 384
+  audio_batching: packed
+  audio_loader_workers: 4
+  text_cache_max_entries: 30000
+  text_cache_batch_size: 1024
+  prewarm_text_cache: true
+  negative_count: 4095
+  strict_negative_count: true
+  local_min_chars: 2
+  local_max_chars: 8
+  local_min_words: 1
+  local_max_words: 4
+  sampling_strategy: proportional
+  samples_per_epoch: 0
+  require_multilingual_metadata: true
+  seed: 42
+
+evaluation:
+  strategy: epoch
+  steps: 100
+  batch_size: 8
+  negative_count: 4095
+  strict_negative_count: true
+  max_samples: 0
+  selection_metric: macro_language_recall_at_50
+
+index:
+  block_size: 16384
+  text_batch_size: 512
+
+streaming:
+  chunk_size_sec: 2.0
+  feed_step_ms: 100
+  top_k: 50
+
+distributed:
+  backend: nccl
+
+runtime:
+  device: cuda
+  allow_cpu: false

@@ -28,6 +28,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--baseline", help="Matched global-only CLAP JSONL")
+    parser.add_argument(
+        "--monolingual-reference",
+        help="Matched same-model retrieval against the monolingual catalog",
+    )
     parser.add_argument("--output")
     parser.add_argument("--bootstrap-samples", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=42)
@@ -66,7 +70,16 @@ def main() -> None:
         base = args.output or args.input + ".metrics.json"
         entity_path = args.entity_output or base + ".entities.jsonl"
         refresh_path = args.refresh_output or base + ".refreshes.jsonl"
-        protected = {Path(path).resolve() for path in (args.input, args.timing_manifest, args.baseline) if path}
+        protected = {
+            Path(path).resolve()
+            for path in (
+                args.input,
+                args.timing_manifest,
+                args.baseline,
+                args.monolingual_reference,
+            )
+            if path
+        }
         destinations = [Path(path).resolve() for path in (entity_path, refresh_path, args.output) if path]
         if len(set(destinations)) != len(destinations) or protected & set(destinations):
             raise ValueError("metric outputs must be distinct from one another and inputs")
@@ -94,6 +107,26 @@ def main() -> None:
             metrics["recall_at_50_gain_vs_global_only"] = gain
             metrics["recall_at_50_gain_ci95_low"] = ci_low
             metrics["recall_at_50_gain_ci95_high"] = ci_high
+
+    if args.monolingual_reference:
+        reference_by_id = {
+            str(record["utt_id"]): record for record in _load(args.monolingual_reference)
+        }
+        differences = []
+        for record in records:
+            reference = reference_by_id.get(str(record["utt_id"]))
+            if reference is not None:
+                differences.append(
+                    record_recall_at_k(reference, 50) - record_recall_at_k(record, 50)
+                )
+        if differences:
+            penalty = sum(differences) / len(differences)
+            low, high = paired_bootstrap_mean_ci(
+                differences, samples=args.bootstrap_samples, seed=args.seed
+            )
+            metrics["mixed_catalog_penalty_at_50"] = penalty
+            metrics["mixed_catalog_penalty_ci95_low"] = low
+            metrics["mixed_catalog_penalty_ci95_high"] = high
 
     offline_rate = metrics.get("offline_final_exact_match_rate")
     metrics["go_no_go_recall"] = bool(gain is not None and gain >= 0.05 and ci_low is not None and ci_low > 0)

@@ -51,7 +51,8 @@ def evaluate_glclap_records(
     records: Iterable[Mapping[str, Any]],
     *,
     ks: Sequence[int] = (1, 5, 10, 20, 50),
-) -> dict[str, float | int]:
+    include_groups: bool = True,
+) -> dict[str, Any]:
     """Aggregate retrieval quality, boundary, and latency measurements."""
 
     items = list(records)
@@ -120,6 +121,40 @@ def evaluate_glclap_records(
     exact = [bool(record["offline_final_exact_match"]) for record in items if "offline_final_exact_match" in record]
     if exact:
         metrics["offline_final_exact_match_rate"] = float(np.mean(exact))
+    if include_groups:
+        by_language: dict[str, Any] = {}
+        by_dataset: dict[str, Any] = {}
+        for language in sorted(
+            {str(record.get("language", "unknown")) for record in items}
+        ):
+            by_language[language] = evaluate_glclap_records(
+                [record for record in items if str(record.get("language", "unknown")) == language],
+                ks=ks,
+                include_groups=False,
+            )
+        for dataset in sorted(
+            {str(record.get("corpus", record.get("dataset", "unknown"))) for record in items}
+        ):
+            by_dataset[dataset] = evaluate_glclap_records(
+                [
+                    record
+                    for record in items
+                    if str(record.get("corpus", record.get("dataset", "unknown"))) == dataset
+                ],
+                ks=ks,
+                include_groups=False,
+            )
+        metrics["by_language"] = by_language
+        metrics["by_dataset"] = by_dataset
+        if 50 in {int(k) for k in ks}:
+            language_recalls = [
+                float(value["recall_at_50"])
+                for value in by_language.values()
+                if int(value["evaluable_utterances"]) > 0
+            ]
+            metrics["macro_language_recall_at_50"] = (
+                float(np.mean(language_recalls)) if language_recalls else 0.0
+            )
     return metrics
 
 

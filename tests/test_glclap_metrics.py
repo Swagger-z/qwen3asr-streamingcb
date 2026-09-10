@@ -40,6 +40,17 @@ class GLCLAPMetricTests(unittest.TestCase):
             paired_bootstrap_mean_ci([0.0, 1.0, 1.0], samples=100, seed=7),
         )
 
+    def test_language_and_dataset_views_use_equal_language_macro(self) -> None:
+        chinese = record("zh", "center", ["gold"], "gold")
+        chinese.update({"language": "zh", "corpus": "aishell-ner"})
+        english = record("en", "center", ["wrong"], "gold")
+        english.update({"language": "en", "corpus": "librispeech"})
+        metrics = evaluate_glclap_records([chinese, english])
+        self.assertEqual(metrics["by_language"]["zh"]["recall_at_50"], 1.0)
+        self.assertEqual(metrics["by_language"]["en"]["recall_at_50"], 0.0)
+        self.assertEqual(metrics["macro_language_recall_at_50"], 0.5)
+        self.assertEqual(set(metrics["by_dataset"]), {"aishell-ner", "librispeech"})
+
 
 if __name__ == "__main__":
     unittest.main()

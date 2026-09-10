@@ -230,6 +230,8 @@ def evaluate_online_records(records: Sequence[Mapping[str, Any]], *,
             t = float(batch["timeline"]["audio_cutoff_sec"])
             eligible = [entity for entity in entities if entity["is_first_occurrence"] and entity["end_sec"] <= t + _EPS]
             row = {"key": key, "source_utt_id": record.get("source_utt_id", key),
+                   "language": record.get("language", "unknown"),
+                   "corpus": record.get("corpus", record.get("dataset", "unknown")),
                    "chunk_id": batch["chunk_id"], "boundary_group": record.get("boundary_group", "unspecified"),
                    "completed_primary_count": len(eligible), **batch["timeline"],
                    "is_final": batch["is_final"], "frame_count": batch.get("frame_count"),
@@ -247,6 +249,8 @@ def evaluate_online_records(records: Sequence[Mapping[str, Any]], *,
                 first = next((j for j in eligible if hits[j]), None)
                 primary = entity["is_first_occurrence"]
                 row = {"key": key, "source_utt_id": record.get("source_utt_id", key),
+                       "language": record.get("language", "unknown"),
+                       "corpus": record.get("corpus", record.get("dataset", "unknown")),
                        "mention_id": entity["mention_id"], "hotword_id": entity["hotword_id"],
                        "start_sec": start, "end_sec": end, "k": k, "primary": primary,
                        "boundary_group": record.get("boundary_group", "unspecified"),

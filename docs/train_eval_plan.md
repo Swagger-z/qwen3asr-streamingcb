@@ -1,5 +1,13 @@
 # Training and Evaluation Plan
 
+> Implementation update (2026-09-10): the multilingual retrieval pipeline supports training on
+> AISHELL-1 + AISHELL-2 + MagicData + HKUST + LibriSpeech 960h while a separate track
+> studies prefix-safe prompt/logit injection. The implemented multilingual sampling,
+> dev/test split, evaluation, and integration gates are in
+> [the dated experiment progress note](experiment_progress_2026-09-03.md).
+> The paper-level matrix below remains the broader target until that proposal is
+> validated and promoted into the canonical protocol.
+
 ## Models and compute
 
 - Qwen3-ASR-0.6B: complete development and ablation matrix

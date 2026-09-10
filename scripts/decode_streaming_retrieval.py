@@ -250,6 +250,7 @@ def main() -> None:
                     "original_audio", "original_audio_sha256", "original_duration_sec",
                     "hotword_start_sec", "hotword_end_sec", "word_start_sec", "word_end_sec",
                     "leading_silence_sec", "boundary_chunk_sec", "metadata",
+                    "language", "corpus", "split", "source_key",
                 ) if name in record},
                 "result_schema_version": 2,
                 "retrieval_mode": args.mode,

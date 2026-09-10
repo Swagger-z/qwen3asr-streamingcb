@@ -71,20 +71,27 @@ class NegativeFilteringTests(unittest.TestCase):
     def test_training_uses_transcripts_but_validation_keeps_gold_labels(self) -> None:
         source = Path(__file__).resolve().parents[1] / "scripts/train_glclap_retriever.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))
-        for function_name, builder, first_argument in (
-            ("main", "transcript_positive_mask", "transcripts"),
-            ("_evaluate", "membership_positive_mask", "positive_groups"),
+        for function_name, builder in (
+            ("main", "transcript_positive_mask"),
+            ("_evaluate", "membership_positive_mask"),
         ):
             function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                             and node.name == function_name)
-            assignments = [node for node in ast.walk(function) if isinstance(node, ast.Assign)
-                           and any(isinstance(target, ast.Name) and target.id == "local_mask"
-                                   for target in node.targets)]
-            self.assertEqual(len(assignments), 1)
-            builder_call = assignments[0].value.args[0]
-            self.assertEqual(builder_call.func.id, builder)
-            self.assertEqual([argument.id for argument in builder_call.args],
-                             [first_argument, "candidates"])
+            calls = [
+                node
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == builder
+            ]
+            self.assertEqual(len(calls), 1)
+            if function_name == "_evaluate":
+                self.assertEqual(calls[0].args[0].id, "positive_groups")
+            else:
+                self.assertEqual(calls[0].args[0].id, "group_transcripts")
+                self.assertTrue(
+                    any(keyword.arg == "language" for keyword in calls[0].keywords)
+                )
 
     def test_all_spoken_substrings_are_excluded_from_negative_sampling(self) -> None:
         exclusions = batch_negative_exclusions(

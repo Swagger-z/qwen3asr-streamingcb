@@ -176,6 +176,7 @@ def main() -> None:
             type_counts[mention.entity_type] += 1
             entity = {
                 **asdict(mention),
+                "id": hotword_id,
                 "mention_id": f"{utt_id}#entity-{mention_index:02d}",
                 "hotword_id": hotword_id,
             }
@@ -186,6 +187,10 @@ def main() -> None:
             "key": utt_id,
             "source": str(audio_by_id[utt_id]),
             "target": transcript,
+            "source_key": utt_id,
+            "language": "zh",
+            "corpus": "aishell-ner",
+            "split": args.split,
             "utt_id": utt_id,
             "audio": str(audio_by_id[utt_id]),
             "text": transcript,
